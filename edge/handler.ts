@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import type { EdgeConfig } from "./config.ts";
 import { config as defaultConfig } from "./config.ts";
+import { splitMessageUnicode, deliverTelegramText } from "./delivery.ts";
+import type { DeliveryResult, DeliveryOptions } from "./delivery.ts";
 
 export interface TelegramUser {
   id: number;
@@ -251,31 +253,11 @@ export async function sendTelegramMessage(
 }
 
 /**
- * Split long message text into safe chunks under Telegram's 4096 char limit
+ * Split long message text into safe chunks under Telegram's 4096 char limit,
+ * strictly preserving Unicode boundaries (grapheme clusters and surrogate pairs).
  */
 export function splitMessage(text: string, limit: number = 4000): string[] {
-  if (text.length <= limit) return [text];
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= limit) {
-      chunks.push(remaining);
-      break;
-    }
-    // Find last newline before limit to avoid splitting sentences awkwardly
-    let splitIndex = remaining.lastIndexOf("\n", limit);
-    if (splitIndex === -1 || splitIndex < limit / 2) {
-      // Fallback to space
-      splitIndex = remaining.lastIndexOf(" ", limit);
-    }
-    if (splitIndex === -1 || splitIndex < limit / 2) {
-      // Hard split on character limit
-      splitIndex = limit;
-    }
-    chunks.push(remaining.slice(0, splitIndex).trim());
-    remaining = remaining.slice(splitIndex).trim();
-  }
-  return chunks;
+  return splitMessageUnicode(text, limit);
 }
 
 /**
@@ -418,18 +400,38 @@ export async function handleTelegramWebhook(
     typing.stop();
   }
 
-  // 5. Send reply to the same private chat
+  // 5. Deliver response to the same private chat
   if (result.status === "completed" && result.answer) {
-    const chunks = splitMessage(result.answer);
-    for (const chunk of chunks) {
-      await sendTelegramMessage(cfg.telegramBotToken, normalized.chat_id, chunk);
-    }
+    const delivery = await deliverTelegramText({
+      botToken: cfg.telegramBotToken,
+      chatId: normalized.chat_id,
+      text: result.answer,
+      deliveryBudgetMs: 15000,
+    });
+
+    return {
+      statusCode: 200,
+      responseBody: {
+        ...result,
+        delivery: {
+          delivered: delivery.success,
+          sent_message_ids: delivery.sentMessageIds,
+          error: delivery.error || null,
+        },
+      },
+    };
   } else {
     // Deliver concise reply on auth failure, timeout, or backend unavailability
     const replyText =
       result.user_message || "An unexpected error occurred while processing your request.";
-    await sendTelegramMessage(cfg.telegramBotToken, normalized.chat_id, replyText);
+    if (cfg.telegramBotToken) {
+      await deliverTelegramText({
+        botToken: cfg.telegramBotToken,
+        chatId: normalized.chat_id,
+        text: replyText,
+        deliveryBudgetMs: 5000,
+      });
+    }
+    return { statusCode: 200, responseBody: result };
   }
-
-  return { statusCode: 200, responseBody: result };
 }
