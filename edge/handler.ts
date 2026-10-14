@@ -421,9 +421,11 @@ export async function handleTelegramWebhook(
       },
     };
   } else {
-    // Deliver concise reply on auth failure, timeout, or backend unavailability
+    // Deliver concise reply on auth failure, timeout, backend unavailability, or partial status on limit exhaustion
     const replyText =
-      result.user_message || "An unexpected error occurred while processing your request.";
+      result.answer ||
+      result.user_message ||
+      "An unexpected error occurred while processing your request.";
     if (cfg.telegramBotToken) {
       await deliverTelegramText({
         botToken: cfg.telegramBotToken,
