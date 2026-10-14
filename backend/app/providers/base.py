@@ -17,7 +17,7 @@ class ModelResponse(BaseModel):
 
 class BaseModelProvider(ABC):
     """
-    Abstract adapter for LLM providers (Anthropic, OpenAI).
+    Abstract adapter for LLM provider (Google Gemini).
     Preserves provider tool-call IDs and formats tool schemas.
     """
 

@@ -5,8 +5,7 @@ from typing import Optional
 from backend.app.schemas import RunRequest, RunResponse
 from backend.app.storage import storage, RequestRecord
 from backend.app.mcp_manager import mcp_manager
-from backend.app.providers.anthropic_provider import AnthropicProvider
-from backend.app.providers.openai_provider import OpenAIProvider
+from backend.app.providers.gemini_provider import GeminiProvider
 from backend.app.providers.base import BaseModelProvider
 
 logger = logging.getLogger(__name__)
@@ -31,13 +30,7 @@ class AgentRunner:
         self.deadline_seconds = float(os.environ.get("RUN_DEADLINE_SECONDS", deadline_seconds))
 
     def _get_provider(self) -> BaseModelProvider:
-        provider_name = os.environ.get("MODEL_PROVIDER", "gemini").lower()
-        if provider_name == "gemini":
-            from backend.app.providers.gemini_provider import GeminiProvider
-            return GeminiProvider()
-        elif provider_name == "openai":
-            return OpenAIProvider()
-        return AnthropicProvider()
+        return GeminiProvider()
 
     async def run(self, request: RunRequest) -> RunResponse:
         # Check deduplication in authoritative shared storage
