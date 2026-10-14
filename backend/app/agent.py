@@ -37,16 +37,37 @@ class AgentRunner:
         return AnthropicProvider()
 
     async def run(self, request: RunRequest) -> RunResponse:
-        # Check deduplication
+        # Check deduplication in authoritative shared storage
         existing = await storage.get_by_update_id(request.update_id)
-        if existing and existing.status == "completed":
-            logger.info(f"Replaying cached response for update_id={request.update_id}")
-            return RunResponse(
-                request_id=request.request_id,
-                status="completed",
-                answer=existing.answer,
-                error_code=existing.error_code,
-            )
+        if existing:
+            if existing.status == "completed":
+                logger.info(f"Replaying cached response for update_id={request.update_id}")
+                return RunResponse(
+                    request_id=request.request_id,
+                    status="completed",
+                    answer=existing.answer,
+                    error_code=existing.error_code,
+                )
+            elif existing.status == "in_progress":
+                logger.info(f"Duplicate request in progress for update_id={request.update_id}, waiting...")
+                # Wait briefly for in-progress execution to finish
+                for _ in range(25):  # up to 5 seconds
+                    await asyncio.sleep(0.2)
+                    check = await storage.get_by_update_id(request.update_id)
+                    if check and check.status == "completed":
+                        return RunResponse(
+                            request_id=request.request_id,
+                            status="completed",
+                            answer=check.answer,
+                            error_code=check.error_code,
+                        )
+                # If still in progress, return in_progress without repeating tool loop
+                return RunResponse(
+                    request_id=request.request_id,
+                    status="in_progress",
+                    answer=None,
+                    error_code=None,
+                )
 
         # Record in-progress state
         record = RequestRecord(

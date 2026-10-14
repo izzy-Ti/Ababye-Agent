@@ -184,6 +184,28 @@ test("evaluateTelegramUpdate supports captions as fallback for text", () => {
   const result = evaluateTelegramUpdate(update, 12345);
   assert.equal(result.accepted, true);
   assert.equal(result.normalized?.text, "Analyze this document");
+  assert.equal(result.normalized?.update_id, 114);
+  assert.equal(result.normalized?.chat_id, 12345);
+  assert.equal(result.normalized?.message_id, 8);
+  assert.equal(result.normalized?.user_id, 12345);
+});
+
+test("evaluateTelegramUpdate rejects prompts exceeding maxPromptLength", () => {
+  const longText = "A".repeat(501);
+  const update = {
+    update_id: 115,
+    message: {
+      message_id: 9,
+      date: 1700000000,
+      chat: { id: 12345, type: "private" },
+      from: { id: 12345, is_bot: false, first_name: "Owner" },
+      text: longText,
+    },
+  };
+
+  const result = evaluateTelegramUpdate(update, 12345, 500);
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "prompt_too_long");
 });
 
 // ----------------------------------------------------

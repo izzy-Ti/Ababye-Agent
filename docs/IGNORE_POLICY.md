@@ -59,6 +59,13 @@ The assistant is strictly single-tenant and private. To protect the assistant fr
 
 ---
 
+### 7. Prompt Length Limit (`text.length > MAX_PROMPT_LENGTH`)
+- **Condition**: User message text or caption exceeds the configured `MAX_PROMPT_LENGTH` (default: 4000 characters).
+- **Action**: Return HTTP `200 OK` with `{ status: "ignored", reason: "prompt_too_long" }` and send notification to user.
+- **Reason**: Protects against denial-of-service, runaway context windows, and excessive token consumption. Model is never called.
+
+---
+
 ## Summary Table
 
 | Update / Request Condition | HTTP Response | Resulting Action | Model Called? |

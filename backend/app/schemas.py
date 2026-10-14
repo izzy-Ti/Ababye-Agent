@@ -8,7 +8,7 @@ class RunRequest(BaseModel):
     user_id: int = Field(..., description="Telegram user ID of the sender")
     chat_id: int = Field(..., description="Telegram chat ID")
     message_id: int = Field(..., description="Telegram message ID")
-    text: str = Field(..., min_length=1, max_length=10000, description="Normalized user text prompt")
+    text: str = Field(..., min_length=1, max_length=4000, description="Normalized user text prompt")
 
 
 class RunResponse(BaseModel):

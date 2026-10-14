@@ -7,6 +7,7 @@ export interface EdgeConfig {
   edgePort: number;
   callbackSigningSecret?: string;
   backendTimeoutMs: number;
+  maxPromptLength: number;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): EdgeConfig {
@@ -19,6 +20,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const edgePort = parseInt(env.EDGE_PORT || "8080", 10);
   const callbackSigningSecret = env.CALLBACK_SIGNING_SECRET || undefined;
   const backendTimeoutMs = parseInt(env.BACKEND_TIMEOUT_MS || "25000", 10);
+  const maxPromptLength = parseInt(env.MAX_PROMPT_LENGTH || "4000", 10);
 
   return {
     telegramBotToken,
@@ -29,6 +31,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     edgePort,
     callbackSigningSecret,
     backendTimeoutMs,
+    maxPromptLength,
   };
 }
 

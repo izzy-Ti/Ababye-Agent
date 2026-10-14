@@ -65,7 +65,8 @@ export type IgnoreReason =
   | "non_private_chat"
   | "missing_sender"
   | "unauthorized_user"
-  | "empty_text";
+  | "empty_text"
+  | "prompt_too_long";
 
 export interface UpdateEvaluationResult {
   accepted: boolean;
@@ -104,7 +105,8 @@ export function verifyWebhookSecret(
  */
 export function evaluateTelegramUpdate(
   update: any,
-  allowedUserId: number
+  allowedUserId: number,
+  maxPromptLength: number = 4000
 ): UpdateEvaluationResult {
   if (!update || typeof update !== "object") {
     return { accepted: false, reason: "not_an_object" };
@@ -162,10 +164,15 @@ export function evaluateTelegramUpdate(
     return { accepted: false, reason: "unauthorized_user" };
   }
 
-  // 6. Validate message text content
+  // 6. Validate message text content (extract text or caption)
   const rawText = message.text || message.caption || "";
   if (typeof rawText !== "string" || !rawText.trim()) {
     return { accepted: false, reason: "empty_text" };
+  }
+
+  const trimmedText = rawText.trim();
+  if (trimmedText.length > maxPromptLength) {
+    return { accepted: false, reason: "prompt_too_long" };
   }
 
   const messageId = typeof message.message_id === "number" ? message.message_id : 0;
@@ -178,7 +185,7 @@ export function evaluateTelegramUpdate(
       user_id: from.id,
       chat_id: chat.id,
       message_id: messageId,
-      text: rawText.trim(),
+      text: trimmedText,
     },
   };
 }
@@ -188,9 +195,10 @@ export function evaluateTelegramUpdate(
  */
 export function normalizeTelegramUpdate(
   update: TelegramUpdate,
-  allowedUserId: number
+  allowedUserId: number,
+  maxPromptLength: number = 4000
 ): NormalizedAssistantRequest | null {
-  const result = evaluateTelegramUpdate(update, allowedUserId);
+  const result = evaluateTelegramUpdate(update, allowedUserId, maxPromptLength);
   return result.accepted && result.normalized ? result.normalized : null;
 }
 
@@ -329,8 +337,15 @@ export async function handleTelegramWebhook(
   }
 
   // 2. Evaluate update against security constraints and ignore policy
-  const evaluation = evaluateTelegramUpdate(body, cfg.allowedUserId);
+  const evaluation = evaluateTelegramUpdate(body, cfg.allowedUserId, cfg.maxPromptLength);
   if (!evaluation.accepted || !evaluation.normalized) {
+    if (evaluation.reason === "prompt_too_long" && body?.message?.chat?.id) {
+      await sendTelegramMessage(
+        cfg.telegramBotToken,
+        body.message.chat.id,
+        `Message exceeds the maximum allowed length of ${cfg.maxPromptLength} characters.`
+      );
+    }
     // Return 200 with documented ignore reason to acknowledge Telegram without running model/backend
     return {
       statusCode: 200,
