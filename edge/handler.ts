@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { EdgeConfig } from "./config.ts";
 import { config as defaultConfig } from "./config.ts";
 
@@ -27,7 +28,14 @@ export interface TelegramUpdate {
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  edited_channel_post?: TelegramMessage;
   callback_query?: any;
+  inline_query?: any;
+  chosen_inline_result?: any;
+  poll?: any;
+  poll_answer?: any;
+  my_chat_member?: any;
+  chat_member?: any;
 }
 
 export interface NormalizedAssistantRequest {
@@ -46,54 +54,144 @@ export interface AssistantRunResponse {
   error_code: string | null;
 }
 
+export type IgnoreReason =
+  | "not_an_object"
+  | "missing_update_id"
+  | "edited_message_ignored"
+  | "channel_post_ignored"
+  | "unsupported_update_type"
+  | "missing_message"
+  | "missing_chat"
+  | "non_private_chat"
+  | "missing_sender"
+  | "unauthorized_user"
+  | "empty_text";
+
+export interface UpdateEvaluationResult {
+  accepted: boolean;
+  reason?: IgnoreReason;
+  normalized?: NormalizedAssistantRequest;
+}
+
 /**
- * Validates the Telegram secret token header against configured secret.
+ * Validates the Telegram secret token header against configured secret using constant-time comparison.
  */
 export function verifyWebhookSecret(
   providedSecret: string | null | undefined,
   expectedSecret: string
 ): boolean {
-  if (!expectedSecret) return true; // if secret is empty in dev, allow
-  return providedSecret === expectedSecret;
+  if (!expectedSecret) {
+    // If no secret configured in local dev, allow
+    return true;
+  }
+  if (!providedSecret) {
+    return false;
+  }
+
+  const expectedBuf = Buffer.from(expectedSecret, "utf-8");
+  const providedBuf = Buffer.from(providedSecret, "utf-8");
+
+  if (expectedBuf.length !== providedBuf.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
 }
 
 /**
- * Normalizes an incoming update into an assistant run request.
- * Returns null if the update should be ignored (e.g. unauthorized sender, non-private chat, non-text).
+ * Evaluates an incoming update against security constraints and the documented ignore policy.
+ * Handles missing fields safely without throwing.
+ */
+export function evaluateTelegramUpdate(
+  update: any,
+  allowedUserId: number
+): UpdateEvaluationResult {
+  if (!update || typeof update !== "object") {
+    return { accepted: false, reason: "not_an_object" };
+  }
+
+  if (typeof update.update_id !== "number") {
+    return { accepted: false, reason: "missing_update_id" };
+  }
+
+  // 1. Check for edited messages (Policy: ignored to prevent prompt injection and duplicate executions)
+  if (update.edited_message || update.edited_channel_post) {
+    return { accepted: false, reason: "edited_message_ignored" };
+  }
+
+  // 2. Check for channel posts (Policy: only private user chats are accepted)
+  if (update.channel_post) {
+    return { accepted: false, reason: "channel_post_ignored" };
+  }
+
+  // 3. Check for unsupported interactive/update types
+  if (
+    update.callback_query ||
+    update.inline_query ||
+    update.chosen_inline_result ||
+    update.poll ||
+    update.poll_answer ||
+    update.my_chat_member ||
+    update.chat_member
+  ) {
+    return { accepted: false, reason: "unsupported_update_type" };
+  }
+
+  const message = update.message;
+  if (!message || typeof message !== "object") {
+    return { accepted: false, reason: "missing_message" };
+  }
+
+  // 4. Validate chat existence and type
+  const chat = message.chat;
+  if (!chat || typeof chat !== "object") {
+    return { accepted: false, reason: "missing_chat" };
+  }
+
+  if (chat.type !== "private") {
+    return { accepted: false, reason: "non_private_chat" };
+  }
+
+  // 5. Validate sender identity
+  const from = message.from;
+  if (!from || typeof from !== "object" || typeof from.id !== "number") {
+    return { accepted: false, reason: "missing_sender" };
+  }
+
+  if (allowedUserId !== 0 && from.id !== allowedUserId) {
+    return { accepted: false, reason: "unauthorized_user" };
+  }
+
+  // 6. Validate message text content
+  const rawText = message.text || message.caption || "";
+  if (typeof rawText !== "string" || !rawText.trim()) {
+    return { accepted: false, reason: "empty_text" };
+  }
+
+  const messageId = typeof message.message_id === "number" ? message.message_id : 0;
+
+  return {
+    accepted: true,
+    normalized: {
+      request_id: `tg:${update.update_id}`,
+      update_id: update.update_id,
+      user_id: from.id,
+      chat_id: chat.id,
+      message_id: messageId,
+      text: rawText.trim(),
+    },
+  };
+}
+
+/**
+ * Backward-compatible helper that normalizes an update or returns null if ignored.
  */
 export function normalizeTelegramUpdate(
   update: TelegramUpdate,
   allowedUserId: number
 ): NormalizedAssistantRequest | null {
-  const message = update.message;
-  if (!message) {
-    // Non-message updates (e.g. edited_message, inline queries) follow documented ignore policy
-    return null;
-  }
-
-  // Must be from private chat
-  if (message.chat.type !== "private") {
-    return null;
-  }
-
-  // Must be from the allowed user ID
-  if (!message.from || message.from.id !== allowedUserId) {
-    return null;
-  }
-
-  const rawText = message.text || message.caption || "";
-  if (!rawText.trim()) {
-    return null;
-  }
-
-  return {
-    request_id: `tg:${update.update_id}`,
-    update_id: update.update_id,
-    user_id: message.from.id,
-    chat_id: message.chat.id,
-    message_id: message.message_id,
-    text: rawText.trim(),
-  };
+  const result = evaluateTelegramUpdate(update, allowedUserId);
+  return result.accepted && result.normalized ? result.normalized : null;
 }
 
 /**
@@ -225,17 +323,22 @@ export async function handleTelegramWebhook(
   body: any,
   cfg: EdgeConfig = defaultConfig
 ): Promise<{ statusCode: number; responseBody: Record<string, any> }> {
-  // 1. Verify Secret Token
+  // 1. Verify Secret Token (401 if invalid)
   if (!verifyWebhookSecret(secretHeader, cfg.telegramWebhookSecret)) {
     return { statusCode: 401, responseBody: { error: "Invalid webhook secret" } };
   }
 
-  // 2. Normalize and filter update
-  const normalized = normalizeTelegramUpdate(body as TelegramUpdate, cfg.allowedUserId);
-  if (!normalized) {
-    // Return 200 to acknowledge ignored / unauthorized update without processing
-    return { statusCode: 200, responseBody: { status: "ignored" } };
+  // 2. Evaluate update against security constraints and ignore policy
+  const evaluation = evaluateTelegramUpdate(body, cfg.allowedUserId);
+  if (!evaluation.accepted || !evaluation.normalized) {
+    // Return 200 with documented ignore reason to acknowledge Telegram without running model/backend
+    return {
+      statusCode: 200,
+      responseBody: { status: "ignored", reason: evaluation.reason || "unsupported" },
+    };
   }
+
+  const normalized = evaluation.normalized;
 
   // 3. Send typing action (non-blocking)
   sendTypingAction(cfg.telegramBotToken, normalized.chat_id).catch(() => {});

@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node --experimental-strip-types server.ts",
     "dev": "node --experimental-strip-types --watch server.ts",
-    "test": "node --test --experimental-strip-types"
+    "test": "node --test --experimental-strip-types",
+    "webhook:info": "node --experimental-strip-types register_webhook.ts info",
+    "webhook:set": "node --experimental-strip-types register_webhook.ts set",
+    "webhook:delete": "node --experimental-strip-types register_webhook.ts delete"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
