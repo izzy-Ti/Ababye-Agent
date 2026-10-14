@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "echo": {
+      "command": "python",
+      "args": ["-m", "backend.app.mcp_servers.echo_server"],
+      "env": {},
+      "permitted_env_vars": [
+        "PATH",
+        "SYSTEMROOT",
+        "PYTHONPATH",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "USERPROFILE"
+      ],
+      "tool_allowlist": ["echo", "add", "slow_echo"]
+    }
+  }
+}
