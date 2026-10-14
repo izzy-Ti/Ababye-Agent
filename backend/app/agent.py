@@ -31,8 +31,11 @@ class AgentRunner:
         self.deadline_seconds = float(os.environ.get("RUN_DEADLINE_SECONDS", deadline_seconds))
 
     def _get_provider(self) -> BaseModelProvider:
-        provider_name = os.environ.get("MODEL_PROVIDER", "anthropic").lower()
-        if provider_name == "openai":
+        provider_name = os.environ.get("MODEL_PROVIDER", "gemini").lower()
+        if provider_name == "gemini":
+            from backend.app.providers.gemini_provider import GeminiProvider
+            return GeminiProvider()
+        elif provider_name == "openai":
             return OpenAIProvider()
         return AnthropicProvider()
 

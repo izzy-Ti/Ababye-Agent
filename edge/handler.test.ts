@@ -1,13 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import {
   verifyWebhookSecret,
   evaluateTelegramUpdate,
   normalizeTelegramUpdate,
   splitMessage,
   handleTelegramWebhook,
+  callBackendAssistant,
+  TypingController,
 } from "./handler.ts";
-import type { TelegramUpdate, EdgeConfig } from "./handler.ts";
+import type { TelegramUpdate, EdgeConfig, NormalizedAssistantRequest } from "./handler.ts";
 
 const mockConfig: EdgeConfig = {
   telegramBotToken: "mock-bot-token",
@@ -17,6 +20,7 @@ const mockConfig: EdgeConfig = {
   edgeBackendSecret: "mock-backend-secret",
   edgePort: 8080,
   backendTimeoutMs: 1000,
+  maxPromptLength: 4000,
 };
 
 // ----------------------------------------------------
@@ -209,6 +213,198 @@ test("evaluateTelegramUpdate rejects prompts exceeding maxPromptLength", () => {
 });
 
 // ----------------------------------------------------
+// TypingController Lifecycle Tests
+// ----------------------------------------------------
+test("TypingController starts and stops cleanly without leakage", () => {
+  const controller = new TypingController("test-token", 12345);
+  controller.start(500);
+  assert.ok(controller);
+  controller.stop();
+  // Double stop should be safe
+  assert.doesNotThrow(() => controller.stop());
+});
+
+// ----------------------------------------------------
+// callBackendAssistant & Concise Error Replies Tests
+// ----------------------------------------------------
+test("callBackendAssistant returns completed answer from backend stub", async () => {
+  let receivedAuth = "";
+  let receivedBody: any = null;
+
+  const server = http.createServer((req, res) => {
+    receivedAuth = req.headers["authorization"] || "";
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      receivedBody = JSON.parse(data);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          request_id: receivedBody.request_id,
+          status: "completed",
+          answer: "Hello from backend stub!",
+          error_code: null,
+        })
+      );
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as any).port;
+
+  try {
+    const payload: NormalizedAssistantRequest = {
+      request_id: "tg:201",
+      update_id: 201,
+      user_id: 12345,
+      chat_id: 12345,
+      message_id: 10,
+      text: "Hello",
+    };
+
+    const cfg: EdgeConfig = {
+      ...mockConfig,
+      backendUrl: `http://127.0.0.1:${port}`,
+      edgeBackendSecret: "secret-token-123",
+      backendTimeoutMs: 2000,
+    };
+
+    const result = await callBackendAssistant(payload, cfg);
+    assert.equal(result.status, "completed");
+    assert.equal(result.answer, "Hello from backend stub!");
+    assert.equal(receivedAuth, "Bearer secret-token-123");
+    assert.equal(receivedBody.request_id, "tg:201");
+  } finally {
+    server.close();
+  }
+});
+
+test("callBackendAssistant handles auth failure (401) with concise reply", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ detail: "Unauthorized" }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as any).port;
+
+  try {
+    const payload: NormalizedAssistantRequest = {
+      request_id: "tg:202",
+      update_id: 202,
+      user_id: 12345,
+      chat_id: 12345,
+      message_id: 11,
+      text: "Hello",
+    };
+
+    const cfg: EdgeConfig = {
+      ...mockConfig,
+      backendUrl: `http://127.0.0.1:${port}`,
+    };
+
+    const result = await callBackendAssistant(payload, cfg);
+    assert.equal(result.status, "error");
+    assert.equal(result.error_code, "HTTP_401");
+    assert.equal(result.user_message, "Authentication failed: Backend access is unauthorized.");
+  } finally {
+    server.close();
+  }
+});
+
+test("callBackendAssistant handles forbidden user (403) with concise reply", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ detail: "Forbidden" }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as any).port;
+
+  try {
+    const payload: NormalizedAssistantRequest = {
+      request_id: "tg:203",
+      update_id: 203,
+      user_id: 99999,
+      chat_id: 99999,
+      message_id: 12,
+      text: "Forbidden prompt",
+    };
+
+    const cfg: EdgeConfig = {
+      ...mockConfig,
+      backendUrl: `http://127.0.0.1:${port}`,
+    };
+
+    const result = await callBackendAssistant(payload, cfg);
+    assert.equal(result.status, "error");
+    assert.equal(result.error_code, "HTTP_403");
+    assert.equal(result.user_message, "Access denied: Your account is not authorized.");
+  } finally {
+    server.close();
+  }
+});
+
+test("callBackendAssistant handles abort timeout with concise reply", async () => {
+  // A server that hangs and never responds
+  const server = http.createServer((_req, _res) => {});
+
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as any).port;
+
+  try {
+    const payload: NormalizedAssistantRequest = {
+      request_id: "tg:204",
+      update_id: 204,
+      user_id: 12345,
+      chat_id: 12345,
+      message_id: 13,
+      text: "Slow prompt",
+    };
+
+    const cfg: EdgeConfig = {
+      ...mockConfig,
+      backendUrl: `http://127.0.0.1:${port}`,
+      backendTimeoutMs: 100, // abort after 100ms
+    };
+
+    const result = await callBackendAssistant(payload, cfg);
+    assert.equal(result.status, "error");
+    assert.equal(result.error_code, "DEADLINE_EXCEEDED");
+    assert.equal(
+      result.user_message,
+      "Request timed out while waiting for a response. Please try again."
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test("callBackendAssistant handles unavailable backend with concise reply", async () => {
+  // Point to a port where nothing is listening
+  const payload: NormalizedAssistantRequest = {
+    request_id: "tg:205",
+    update_id: 205,
+    user_id: 12345,
+    chat_id: 12345,
+    message_id: 14,
+    text: "Offline prompt",
+  };
+
+  const cfg: EdgeConfig = {
+    ...mockConfig,
+    backendUrl: "http://127.0.0.1:49999",
+  };
+
+  const result = await callBackendAssistant(payload, cfg);
+  assert.equal(result.status, "error");
+  assert.equal(
+    result.user_message,
+    "Assistant service is currently unavailable. Please try again later."
+  );
+});
+
+// ----------------------------------------------------
 // handleTelegramWebhook Webhook Flow Tests
 // ----------------------------------------------------
 test("handleTelegramWebhook rejects invalid secret with 401", async () => {
@@ -229,7 +425,6 @@ test("handleTelegramWebhook ignores unauthorized update with 200 without calling
     },
   };
 
-  // Backend URL is an unreachable port; if backend is called, it would fail or throw
   const res = await handleTelegramWebhook("super-secret-token", unauthorizedUpdate, mockConfig);
   assert.equal(res.statusCode, 200);
   assert.equal(res.responseBody.status, "ignored");

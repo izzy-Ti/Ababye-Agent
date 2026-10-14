@@ -52,6 +52,7 @@ export interface AssistantRunResponse {
   status: "completed" | "error" | "in_progress";
   answer: string | null;
   error_code: string | null;
+  user_message?: string;
 }
 
 export type IgnoreReason =
@@ -278,7 +279,41 @@ export function splitMessage(text: string, limit: number = 4000): string[] {
 }
 
 /**
- * Call FastAPI backend assistant endpoint with an abort timeout
+ * Manages periodic Telegram typing action refreshes while backend processing is active.
+ * Refreshes only while the request is kept alive, and cleanly cleans up afterwards.
+ */
+export class TypingController {
+  private timer: NodeJS.Timeout | null = null;
+  private botToken: string;
+  private chatId: number;
+
+  constructor(botToken: string, chatId: number) {
+    this.botToken = botToken;
+    this.chatId = chatId;
+  }
+
+  start(intervalMs: number = 4000): void {
+    if (!this.botToken) return;
+    // Send immediate typing action before backend call begins
+    sendTypingAction(this.botToken, this.chatId).catch(() => {});
+
+    // Refresh periodically while the host keeps the request alive
+    this.timer = setInterval(() => {
+      sendTypingAction(this.botToken, this.chatId).catch(() => {});
+    }, intervalMs);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+}
+
+/**
+ * Call FastAPI backend assistant endpoint with an abort deadline.
+ * Maps HTTP status and network faults to concise user messages.
  */
 export async function callBackendAssistant(
   payload: NormalizedAssistantRequest,
@@ -299,12 +334,23 @@ export async function callBackendAssistant(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      let conciseUserMsg = "An unexpected error occurred while processing your request.";
+      if (response.status === 401) {
+        conciseUserMsg = "Authentication failed: Backend access is unauthorized.";
+      } else if (response.status === 403) {
+        conciseUserMsg = "Access denied: Your account is not authorized.";
+      } else if (response.status === 422) {
+        conciseUserMsg = "Invalid request format.";
+      } else if (response.status >= 500) {
+        conciseUserMsg = "Assistant service is currently unavailable. Please try again later.";
+      }
+
       return {
         request_id: payload.request_id,
         status: "error",
         answer: null,
-        error_code: `HTTP_${response.status}: ${errorText}`,
+        error_code: `HTTP_${response.status}`,
+        user_message: conciseUserMsg,
       };
     }
 
@@ -312,11 +358,16 @@ export async function callBackendAssistant(
     return data;
   } catch (err: any) {
     const isAbort = err.name === "AbortError";
+    const conciseUserMsg = isAbort
+      ? "Request timed out while waiting for a response. Please try again."
+      : "Assistant service is currently unavailable. Please try again later.";
+
     return {
       request_id: payload.request_id,
       status: "error",
       answer: null,
-      error_code: isAbort ? "DEADLINE_EXCEEDED" : (err.message || "BACKEND_UNAVAILABLE"),
+      error_code: isAbort ? "DEADLINE_EXCEEDED" : (err.code || "BACKEND_UNAVAILABLE"),
+      user_message: conciseUserMsg,
     };
   } finally {
     clearTimeout(timeoutId);
@@ -324,7 +375,7 @@ export async function callBackendAssistant(
 }
 
 /**
- * Primary edge handler logic for an incoming webhook update
+ * Primary edge handler logic for an incoming webhook update.
  */
 export async function handleTelegramWebhook(
   secretHeader: string | null | undefined,
@@ -355,21 +406,29 @@ export async function handleTelegramWebhook(
 
   const normalized = evaluation.normalized;
 
-  // 3. Send typing action (non-blocking)
-  sendTypingAction(cfg.telegramBotToken, normalized.chat_id).catch(() => {});
+  // 3. Send typing before the call and refresh while the host keeps the request alive
+  const typing = new TypingController(cfg.telegramBotToken, normalized.chat_id);
+  typing.start(4000);
 
   // 4. Call backend assistant
-  const result = await callBackendAssistant(normalized, cfg);
+  let result: AssistantRunResponse;
+  try {
+    result = await callBackendAssistant(normalized, cfg);
+  } finally {
+    typing.stop();
+  }
 
-  // 5. Send reply to Telegram if completed
+  // 5. Send reply to the same private chat
   if (result.status === "completed" && result.answer) {
     const chunks = splitMessage(result.answer);
     for (const chunk of chunks) {
       await sendTelegramMessage(cfg.telegramBotToken, normalized.chat_id, chunk);
     }
-  } else if (result.status === "error") {
-    const errMsg = `Error: ${result.error_code || "An unexpected error occurred."}`;
-    await sendTelegramMessage(cfg.telegramBotToken, normalized.chat_id, errMsg);
+  } else {
+    // Deliver concise reply on auth failure, timeout, or backend unavailability
+    const replyText =
+      result.user_message || "An unexpected error occurred while processing your request.";
+    await sendTelegramMessage(cfg.telegramBotToken, normalized.chat_id, replyText);
   }
 
   return { statusCode: 200, responseBody: result };
