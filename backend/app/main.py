@@ -67,6 +67,23 @@ async def run_assistant(
 
 
 @app.post(
+    "/v1/assistant/cancel",
+    response_model=RunResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Assistant"],
+)
+async def cancel_assistant(
+    request: RunRequest,
+    _auth: str = Depends(verify_bearer_token),
+):
+    verify_allowed_user(request.user_id)
+    request.text = "/cancel"
+    result = await agent_runner.run(request)
+    return result
+
+
+
+@app.post(
     "/v1/assistant/jobs",
     response_model=JobResponse,
     status_code=status.HTTP_202_ACCEPTED,

@@ -39,7 +39,7 @@ class RunRequest(BaseModel):
 
 class RunResponse(BaseModel):
     request_id: str = Field(..., description="Request identifier matching the input")
-    status: Literal["completed", "error", "in_progress"] = Field(
+    status: Literal["completed", "error", "in_progress", "cancelled"] = Field(
         ..., description="Execution status of the assistant run"
     )
     answer: Optional[str] = Field(None, description="Final assistant reply text")

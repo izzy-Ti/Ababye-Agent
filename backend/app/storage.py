@@ -217,6 +217,16 @@ class Storage:
                     """
                 )
 
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS active_cancellations (
+                        chat_id INTEGER PRIMARY KEY,
+                        cancelled_at REAL NOT NULL,
+                        reason TEXT
+                    )
+                    """
+                )
+
                 # Ensure bounded_history, forward_info, and media_type columns exist for backward compatibility
                 cursor = conn.execute("PRAGMA table_info(requests)")
                 columns = [col["name"] for col in cursor.fetchall()]
@@ -569,6 +579,85 @@ class Storage:
                         """,
                         (status, now, result_text, action_id),
                     )
+            finally:
+                conn.close()
+
+    async def set_chat_cancelled(
+        self, chat_id: int, reason: str = "User cancelled via /cancel"
+    ) -> None:
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                now = time.time()
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO active_cancellations (chat_id, cancelled_at, reason)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            cancelled_at = excluded.cancelled_at,
+                            reason = excluded.reason
+                        """,
+                        (chat_id, now, reason),
+                    )
+            finally:
+                conn.close()
+
+    async def is_chat_cancelled(self, chat_id: int) -> bool:
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    "SELECT 1 FROM active_cancellations WHERE chat_id = ?",
+                    (chat_id,),
+                )
+                return cursor.fetchone() is not None
+            finally:
+                conn.close()
+
+    async def clear_chat_cancellation(self, chat_id: int) -> None:
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        "DELETE FROM active_cancellations WHERE chat_id = ?",
+                        (chat_id,),
+                    )
+            finally:
+                conn.close()
+
+    async def get_executed_actions_for_chat(self, chat_id: int) -> List[ActionRecord]:
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT * FROM write_actions
+                    WHERE chat_id = ? AND status = 'executed'
+                    ORDER BY executed_at ASC
+                    """,
+                    (chat_id,),
+                )
+                records = []
+                for row in cursor.fetchall():
+                    records.append(
+                        ActionRecord(
+                            action_id=row["action_id"],
+                            idempotency_key=row["idempotency_key"],
+                            chat_id=row["chat_id"],
+                            user_id=row["user_id"],
+                            tool_name=row["tool_name"],
+                            arguments=json.loads(row["arguments"]),
+                            confirmation_token=row["confirmation_token"],
+                            status=row["status"],
+                            created_at=row["created_at"],
+                            expires_at=row["expires_at"],
+                            executed_at=row["executed_at"],
+                            result=row["result"],
+                        )
+                    )
+                return records
             finally:
                 conn.close()
 

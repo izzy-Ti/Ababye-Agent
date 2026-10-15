@@ -290,6 +290,32 @@ class AgentRunner:
                             error_code=voice_err.error_code,
                         )
 
+                # Handle /cancel command
+                if request.text.strip().lower() == "/cancel":
+                    await storage.set_chat_cancelled(request.chat_id, "User sent /cancel")
+                    from backend.app.queue import durable_queue
+                    await durable_queue.cancel_chat_jobs(request.chat_id)
+
+                    executed = await storage.get_executed_actions_for_chat(request.chat_id)
+                    if executed:
+                        actions_str = ", ".join(f"'{a.tool_name}' ({a.action_id})" for a in executed)
+                        answer = (
+                            f"Active execution cancelled. "
+                            f"Completed write actions remain recorded and are NOT rolled back: {actions_str}."
+                        )
+                    else:
+                        answer = "Active execution cancelled. No active tools were executed."
+
+                    record.status = "completed"
+                    record.answer = answer
+                    await storage.save_request(record)
+                    return RunResponse(
+                        request_id=request.request_id,
+                        status="completed",
+                        answer=answer,
+                        error_code=None,
+                    )
+
                 # Handle /reset command
                 if request.text.strip().lower() == "/reset":
                     await storage.clear_chat_history(request.chat_id)
@@ -332,6 +358,9 @@ class AgentRunner:
                 tools = await mcp_manager.get_tools()
                 tools_dict = [t.to_dict() for t in tools] if tools else None
 
+                # Clear any prior cancellation before starting fresh work
+                await storage.clear_chat_cancellation(request.chat_id)
+
                 # Bounded execution with total deadline
                 start_time = asyncio.get_running_loop().time()
                 async with asyncio.timeout(self.deadline_seconds):
@@ -350,6 +379,30 @@ class AgentRunner:
                     exhaustion_reason = ""
 
                     while True:
+                        # Check cancellation state before each model turn
+                        if await storage.is_chat_cancelled(request.chat_id):
+                            logger.info(f"Cancellation detected before model turn in chat {request.chat_id}")
+                            executed = await storage.get_executed_actions_for_chat(request.chat_id)
+                            if executed:
+                                actions_str = ", ".join(f"'{a.tool_name}' ({a.action_id})" for a in executed)
+                                cancel_msg = (
+                                    f"Execution was cancelled by user request. "
+                                    f"Completed write actions remain recorded and are NOT rolled back: {actions_str}."
+                                )
+                            else:
+                                cancel_msg = "Execution was cancelled by user request. No further tools were executed."
+
+                            record.status = "cancelled"
+                            record.answer = cancel_msg
+                            record.error_code = "CANCELLED"
+                            await storage.save_request(record)
+                            return RunResponse(
+                                request_id=request.request_id,
+                                status="cancelled",
+                                answer=cancel_msg,
+                                error_code="CANCELLED",
+                            )
+
                         # Check turn limit
                         if turns_count >= self.max_turns:
                             limit_exhausted = True
@@ -360,12 +413,25 @@ class AgentRunner:
                         elapsed = asyncio.get_running_loop().time() - start_time
                         remaining_deadline = max(0.5, self.deadline_seconds - elapsed)
 
-                        # Request next turn from model provider
-                        response = await provider.generate_response(
-                            messages=messages,
-                            tools=tools_dict,
-                            system_prompt=DEFAULT_SYSTEM_POLICY,
-                        )
+                        # Request next turn from model provider (retrying transient failures inside budget)
+                        response = None
+                        while response is None:
+                            try:
+                                response = await provider.generate_response(
+                                    messages=messages,
+                                    tools=tools_dict,
+                                    system_prompt=DEFAULT_SYSTEM_POLICY,
+                                )
+                            except Exception as provider_err:
+                                elapsed = asyncio.get_running_loop().time() - start_time
+                                remaining = self.deadline_seconds - elapsed
+                                if remaining > 2.0:
+                                    logger.warning(
+                                        f"Transient provider failure ({provider_err}), retrying within remaining budget ({remaining:.1f}s)..."
+                                    )
+                                    await asyncio.sleep(min(1.0, remaining / 2))
+                                else:
+                                    raise provider_err
 
                         if response.text:
                             last_model_text = response.text
@@ -406,6 +472,31 @@ class AgentRunner:
 
                         # Execute approved tool calls
                         for tc in response.tool_calls:
+                            # Check cancellation state before each tool step to prevent next tool call
+                            if await storage.is_chat_cancelled(request.chat_id):
+                                logger.info(
+                                    f"Cancellation detected before executing tool {tc.name} in chat {request.chat_id}"
+                                )
+                                executed = await storage.get_executed_actions_for_chat(request.chat_id)
+                                if executed:
+                                    actions_str = ", ".join(f"'{a.tool_name}' ({a.action_id})" for a in executed)
+                                    cancel_msg = (
+                                        f"Execution was cancelled before executing tool '{tc.name}'. "
+                                        f"Completed write actions remain recorded and are NOT rolled back: {actions_str}."
+                                    )
+                                else:
+                                    cancel_msg = f"Execution was cancelled before executing tool '{tc.name}'."
+
+                                record.status = "cancelled"
+                                record.answer = cancel_msg
+                                record.error_code = "CANCELLED"
+                                await storage.save_request(record)
+                                return RunResponse(
+                                    request_id=request.request_id,
+                                    status="cancelled",
+                                    answer=cancel_msg,
+                                    error_code="CANCELLED",
+                                )
                             tool_calls_count += 1
                             elapsed = asyncio.get_running_loop().time() - start_time
                             remaining = max(0.5, self.deadline_seconds - elapsed)

@@ -326,6 +326,50 @@ class DurableJobQueue:
             finally:
                 conn.close()
 
+    async def cancel_job(self, job_id: str) -> bool:
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                now = time.time()
+                with conn:
+                    cursor = conn.execute(
+                        """
+                        UPDATE durable_jobs
+                        SET status = 'cancelled',
+                            answer = 'Job was cancelled by user request.',
+                            error_code = 'CANCELLED',
+                            leased_until = NULL,
+                            updated_at = ?
+                        WHERE job_id = ? AND status IN ('queued', 'running')
+                        """,
+                        (now, job_id),
+                    )
+                    return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+    async def cancel_chat_jobs(self, chat_id: int) -> int:
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                now = time.time()
+                with conn:
+                    cursor = conn.execute(
+                        """
+                        UPDATE durable_jobs
+                        SET status = 'cancelled',
+                            answer = 'Job was cancelled by user request.',
+                            error_code = 'CANCELLED',
+                            leased_until = NULL,
+                            updated_at = ?
+                        WHERE chat_id = ? AND status IN ('queued', 'running')
+                        """,
+                        (now, chat_id),
+                    )
+                    return cursor.rowcount
+            finally:
+                conn.close()
+
     def _row_to_record(self, row: sqlite3.Row) -> JobRecord:
         voice_meta = None
         if "voice_metadata" in row.keys() and row["voice_metadata"]:

@@ -189,6 +189,14 @@ def test_api_post_jobs_returns_202_with_job_id(monkeypatch):
     Test FastAPI POST /v1/assistant/jobs endpoint:
     Returns 202 Accepted with job_id and status=queued.
     """
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        tmp_db = f.name
+
+    test_q = DurableJobQueue(db_url=f"sqlite:///{tmp_db}")
+    import backend.app.main as main_mod
+    monkeypatch.setattr(main_mod, "durable_queue", test_q)
+
     client = TestClient(app)
     headers = {"Authorization": "Bearer test-secret-token"}
 
@@ -205,16 +213,22 @@ def test_api_post_jobs_returns_202_with_job_id(monkeypatch):
         "text": "Please run a long database export",
     }
 
-    response = client.post("/v1/assistant/jobs", json=body, headers=headers)
-    assert response.status_code == 202
-    data = response.json()
-    assert "job_id" in data
-    assert data["job_id"].startswith("job_")
-    assert data["status"] == "queued"
-    assert data["request_id"] == "tg:9999"
+    try:
+        response = client.post("/v1/assistant/jobs", json=body, headers=headers)
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert data["job_id"].startswith("job_")
+        assert data["status"] == "queued"
+        assert data["request_id"] == "tg:9999"
 
-    # GET /v1/assistant/jobs/{job_id}
-    job_id = data["job_id"]
-    get_res = client.get(f"/v1/assistant/jobs/{job_id}", headers=headers)
-    assert get_res.status_code == 200
-    assert get_res.json()["job_id"] == job_id
+        # GET /v1/assistant/jobs/{job_id}
+        job_id = data["job_id"]
+        get_res = client.get(f"/v1/assistant/jobs/{job_id}", headers=headers)
+        assert get_res.status_code == 200
+        assert get_res.json()["job_id"] == job_id
+    finally:
+        try:
+            os.remove(tmp_db)
+        except OSError:
+            pass
