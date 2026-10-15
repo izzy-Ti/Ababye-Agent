@@ -4,9 +4,12 @@
 !.env.example
 *.pem
 *.key
+*_key*
+*.pub
 *.cert
 *.crt
 id_rsa
+id_*
 secrets/
 
 # Python
