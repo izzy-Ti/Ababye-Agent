@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { EdgeConfig } from "./config.ts";
+export type { EdgeConfig };
 import { config as defaultConfig } from "./config.ts";
 import { splitMessageUnicode, deliverTelegramText } from "./delivery.ts";
 import type { DeliveryResult, DeliveryOptions } from "./delivery.ts";
