@@ -70,9 +70,12 @@ class MCPServerSession:
 
     DISALLOWED_CORE_SECRETS = {
         "EDGE_BACKEND_SECRET",
+        "INTERNAL_SERVICE_TOKEN",
         "CALLBACK_SIGNING_SECRET",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_WEBHOOK_SECRET",
+        "GEMINI_API_KEY",
+        "ALLOWED_TELEGRAM_USER_ID",
     }
 
     def _build_sanitized_environment(self) -> Dict[str, str]:

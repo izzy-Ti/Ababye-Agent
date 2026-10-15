@@ -28,8 +28,10 @@ def test_dockerfile_pinned_non_root_and_mcp_setup():
 def test_mcp_subprocess_secret_isolation(monkeypatch):
     # Set simulated sensitive backend secrets and server-specific credential
     monkeypatch.setenv("EDGE_BACKEND_SECRET", "super-secret-edge-token")
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "super-secret-internal-token")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:secret-tg-token")
     monkeypatch.setenv("CALLBACK_SIGNING_SECRET", "super-secret-hmac-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-gemini-key")
     monkeypatch.setenv("ALLOWED_MCP_API_KEY", "mcp-service-key-1234")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     
@@ -41,8 +43,10 @@ def test_mcp_subprocess_secret_isolation(monkeypatch):
             "PATH",
             "ALLOWED_MCP_API_KEY",
             "EDGE_BACKEND_SECRET",      # should be blocked
+            "INTERNAL_SERVICE_TOKEN",   # should be blocked
             "TELEGRAM_BOT_TOKEN",       # should be blocked
             "CALLBACK_SIGNING_SECRET",  # should be blocked
+            "GEMINI_API_KEY",           # should be blocked
         ],
         "env": {
             "SAFE_CUSTOM_CONFIG": "custom_val",
@@ -60,6 +64,8 @@ def test_mcp_subprocess_secret_isolation(monkeypatch):
     
     # Sensitive backend secrets are NEVER passed
     assert "EDGE_BACKEND_SECRET" not in env
+    assert "INTERNAL_SERVICE_TOKEN" not in env
     assert "CALLBACK_SIGNING_SECRET" not in env
+    assert "GEMINI_API_KEY" not in env
     assert "TELEGRAM_BOT_TOKEN" not in env or env["TELEGRAM_BOT_TOKEN"] != "override_leak_attempt"
     assert "TELEGRAM_BOT_TOKEN" not in env
