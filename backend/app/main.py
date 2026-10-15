@@ -48,6 +48,17 @@ async def health_check():
     return HealthResponse(status="ok", version="0.1.0")
 
 
+@app.get("/ready", response_model=HealthResponse, tags=["Health"])
+@app.get("/readyz", response_model=HealthResponse, tags=["Health"])
+async def readiness_check():
+    if not mcp_manager.is_ready:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not_ready", "detail": "MCP manager not initialized"},
+        )
+    return HealthResponse(status="ready", version="0.1.0")
+
+
 @app.post(
     "/v1/assistant/run",
     response_model=RunResponse,

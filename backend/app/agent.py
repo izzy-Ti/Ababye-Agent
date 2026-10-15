@@ -46,8 +46,10 @@ class AgentRunner:
         self.max_turns = int(os.environ.get("MAX_MODEL_TURNS", max_turns))
         self.max_tool_calls = int(os.environ.get("MAX_TOOL_CALLS", max_tool_calls))
         self.deadline_seconds = float(os.environ.get("RUN_DEADLINE_SECONDS", deadline_seconds))
+        self.max_concurrency = int(os.environ.get("MAX_CONCURRENCY", "10"))
         self._provider = provider
         self._chat_locks: Dict[int, asyncio.Lock] = {}
+        self._concurrency_semaphore = asyncio.Semaphore(self.max_concurrency)
 
     def _get_chat_lock(self, chat_id: int) -> asyncio.Lock:
         if chat_id not in self._chat_locks:
@@ -235,11 +237,13 @@ class AgentRunner:
                     error_code=None,
                 )
 
-        # 2. Serialize execution per chat (1 active run per chat)
-        chat_lock = self._get_chat_lock(request.chat_id)
-        async with chat_lock:
-            # Re-check deduplication
-            existing = await storage.get_by_update_id(request.update_id)
+        # 2. Global concurrency bounding and per-chat serialization (1 active run per chat)
+        await self._concurrency_semaphore.acquire()
+        try:
+            chat_lock = self._get_chat_lock(request.chat_id)
+            async with chat_lock:
+                # Re-check deduplication
+                existing = await storage.get_by_update_id(request.update_id)
             if existing and existing.status == "completed":
                 return RunResponse(
                     request_id=request.request_id,
@@ -573,6 +577,8 @@ class AgentRunner:
                     answer=record.answer,
                     error_code="INTERNAL_ERROR",
                 )
+        finally:
+            self._concurrency_semaphore.release()
 
 
 agent_runner = AgentRunner()

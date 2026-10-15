@@ -342,6 +342,10 @@ class MCPManager:
         self._initialized = True
         logger.info(f"MCP Manager ready with {len(self._tools)} approved tools.")
 
+    @property
+    def is_ready(self) -> bool:
+        return self._initialized
+
     async def get_tools(self) -> List[MCPToolDefinition]:
         return list(self._tools.values())
 
