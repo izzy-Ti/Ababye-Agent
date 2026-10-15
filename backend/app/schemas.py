@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -9,6 +9,16 @@ class VoiceMetadata(BaseModel):
     duration: Optional[int] = Field(None, description="Audio duration in seconds")
 
 
+class ForwardMetadata(BaseModel):
+    is_forwarded: bool = Field(True, description="Whether message was forwarded")
+    origin_type: Optional[str] = Field(None, description="Type of origin (user, chat, channel, etc.)")
+    from_user_id: Optional[int] = Field(None, description="Attributed original sender user ID")
+    from_name: Optional[str] = Field(None, description="Attributed original sender name")
+    from_chat_id: Optional[int] = Field(None, description="Attributed original chat ID")
+    message_id: Optional[int] = Field(None, description="Attributed original message ID")
+    date: Optional[int] = Field(None, description="Attributed original forward date")
+
+
 class RunRequest(BaseModel):
     request_id: str = Field(..., description="Unique request identifier, e.g. tg:12345")
     update_id: int = Field(..., description="Telegram update ID for deduplication")
@@ -17,6 +27,8 @@ class RunRequest(BaseModel):
     message_id: int = Field(..., description="Telegram message ID")
     text: str = Field("", max_length=4000, description="Normalized user text prompt or transcript")
     voice: Optional[VoiceMetadata] = Field(None, description="Optional voice note metadata")
+    forward_info: Optional[Dict[str, Any]] = Field(None, description="Attribution metadata for forwarded message")
+    media_type: Optional[str] = Field(None, description="Media type if media caption was provided")
 
     @model_validator(mode="after")
     def validate_content(self) -> "RunRequest":

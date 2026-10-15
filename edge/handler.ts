@@ -24,6 +24,16 @@ export interface TelegramVoice {
   file_size?: number;
 }
 
+export interface ForwardMetadata {
+  is_forwarded: boolean;
+  origin_type?: "user" | "hidden_user" | "chat" | "channel" | "legacy";
+  from_user_id?: number;
+  from_name?: string;
+  from_chat_id?: number;
+  message_id?: number;
+  date?: number;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
@@ -32,6 +42,25 @@ export interface TelegramMessage {
   text?: string;
   caption?: string;
   voice?: TelegramVoice;
+  forward_origin?: any;
+  forward_from?: TelegramUser;
+  forward_from_chat?: TelegramChat;
+  forward_from_message_id?: number;
+  forward_date?: number;
+  forward_sender_name?: string;
+  photo?: any[];
+  document?: any;
+  video?: any;
+  animation?: any;
+  audio?: any;
+  sticker?: any;
+  video_note?: any;
+  contact?: any;
+  location?: any;
+  venue?: any;
+  dice?: any;
+  game?: any;
+  story?: any;
 }
 
 export interface TelegramUpdate {
@@ -64,6 +93,8 @@ export interface NormalizedAssistantRequest {
   message_id: number;
   text: string;
   voice?: VoiceMetadata;
+  forward_info?: ForwardMetadata;
+  media_type?: string;
 }
 
 export interface AssistantRunResponse {
@@ -86,7 +117,8 @@ export type IgnoreReason =
   | "missing_sender"
   | "unauthorized_user"
   | "empty_text"
-  | "prompt_too_long";
+  | "prompt_too_long"
+  | "unsupported_media";
 
 export interface UpdateEvaluationResult {
   accepted: boolean;
@@ -180,21 +212,73 @@ export function evaluateTelegramUpdate(
     return { accepted: false, reason: "missing_sender" };
   }
 
+  // Sender authorization is strictly from.id, never derived from forward metadata
   if (allowedUserId !== 0 && from.id !== allowedUserId) {
     return { accepted: false, reason: "unauthorized_user" };
   }
 
-  // 6. Validate message text or voice content
+  // Detect media type
+  let mediaType: string | undefined = undefined;
+  if (Array.isArray(message.photo) && message.photo.length > 0) mediaType = "photo";
+  else if (message.document) mediaType = "document";
+  else if (message.video) mediaType = "video";
+  else if (message.animation) mediaType = "animation";
+  else if (message.audio) mediaType = "audio";
+  else if (message.sticker) mediaType = "sticker";
+  else if (message.video_note) mediaType = "video_note";
+  else if (message.contact) mediaType = "contact";
+  else if (message.location) mediaType = "location";
+  else if (message.venue) mediaType = "venue";
+  else if (message.dice) mediaType = "dice";
+  else if (message.game) mediaType = "game";
+  else if (message.story) mediaType = "story";
+
+  // 6. Validate message text, media caption, or voice content
   const hasVoice = Boolean(message.voice && typeof message.voice.file_id === "string");
   const rawText = message.text || message.caption || "";
+  const trimmedText = typeof rawText === "string" ? rawText.trim() : "";
 
-  if (!hasVoice && (typeof rawText !== "string" || !rawText.trim())) {
+  // Unsupported media: media present without caption/text and without voice
+  if (!hasVoice && mediaType && !trimmedText) {
+    return { accepted: false, reason: "unsupported_media" };
+  }
+
+  if (!hasVoice && !trimmedText) {
     return { accepted: false, reason: "empty_text" };
   }
 
-  const trimmedText = typeof rawText === "string" ? rawText.trim() : "";
   if (trimmedText.length > maxPromptLength) {
     return { accepted: false, reason: "prompt_too_long" };
+  }
+
+  // Extract optional forward attribution metadata
+  let forwardInfo: ForwardMetadata | undefined = undefined;
+  if (message.forward_origin && typeof message.forward_origin === "object") {
+    const fo = message.forward_origin;
+    forwardInfo = {
+      is_forwarded: true,
+      origin_type: fo.type,
+      from_user_id: fo.sender_user?.id,
+      from_name: fo.sender_user?.first_name || fo.sender_user_name,
+      from_chat_id: fo.sender_chat?.id || fo.chat?.id,
+      message_id: fo.message_id,
+      date: fo.date,
+    };
+  } else if (
+    message.forward_from ||
+    message.forward_from_chat ||
+    message.forward_sender_name ||
+    message.forward_date
+  ) {
+    forwardInfo = {
+      is_forwarded: true,
+      origin_type: "legacy",
+      from_user_id: message.forward_from?.id,
+      from_name: message.forward_from?.first_name || message.forward_sender_name,
+      from_chat_id: message.forward_from_chat?.id,
+      message_id: message.forward_from_message_id,
+      date: message.forward_date,
+    };
   }
 
   const messageId = typeof message.message_id === "number" ? message.message_id : 0;
@@ -215,6 +299,14 @@ export function evaluateTelegramUpdate(
       file_size: message.voice.file_size,
       duration: message.voice.duration,
     };
+  }
+
+  if (forwardInfo) {
+    normalized.forward_info = forwardInfo;
+  }
+
+  if (mediaType) {
+    normalized.media_type = mediaType;
   }
 
   return {
@@ -407,6 +499,12 @@ export async function handleTelegramWebhook(
         cfg.telegramBotToken,
         body.message.chat.id,
         `Message exceeds the maximum allowed length of ${cfg.maxPromptLength} characters.`
+      );
+    } else if (evaluation.reason === "unsupported_media" && body?.message?.chat?.id) {
+      await sendTelegramMessage(
+        cfg.telegramBotToken,
+        body.message.chat.id,
+        "Media without a caption is currently unsupported. Please send a text message, voice note, or include a caption with your media."
       );
     }
     // Return 200 with documented ignore reason to acknowledge Telegram without running model/backend

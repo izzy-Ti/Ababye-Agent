@@ -248,7 +248,13 @@ class AgentRunner:
                     error_code=existing.error_code,
                 )
 
-            # Record in-progress state
+            # Record in-progress state (forwarded content is strictly treated as untrusted user-provided content)
+            if request.forward_info:
+                logger.info(
+                    f"Processing forwarded message (origin: {request.forward_info.get('origin_type', 'unknown')}). "
+                    f"Treating text as untrusted user input without permission escalation."
+                )
+
             record = RequestRecord(
                 request_id=request.request_id,
                 update_id=request.update_id,
@@ -257,6 +263,8 @@ class AgentRunner:
                 message_id=request.message_id,
                 text=request.text,
                 status="in_progress",
+                forward_info=request.forward_info,
+                media_type=request.media_type,
             )
             await storage.save_request(record)
 

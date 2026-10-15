@@ -21,6 +21,8 @@ class RequestRecord:
         error_code: Optional[str] = None,
         tool_calls_count: int = 0,
         bounded_history: Optional[List[Dict[str, Any]]] = None,
+        forward_info: Optional[Dict[str, Any]] = None,
+        media_type: Optional[str] = None,
         created_at: Optional[float] = None,
         updated_at: Optional[float] = None,
     ):
@@ -35,6 +37,8 @@ class RequestRecord:
         self.error_code = error_code
         self.tool_calls_count = tool_calls_count
         self.bounded_history = bounded_history or []
+        self.forward_info = forward_info
+        self.media_type = media_type
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
 
@@ -51,6 +55,8 @@ class RequestRecord:
             "error_code": self.error_code,
             "tool_calls_count": self.tool_calls_count,
             "bounded_history": self.bounded_history,
+            "forward_info": self.forward_info,
+            "media_type": self.media_type,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -211,11 +217,15 @@ class Storage:
                     """
                 )
 
-                # Ensure bounded_history column exists for backward compatibility
+                # Ensure bounded_history, forward_info, and media_type columns exist for backward compatibility
                 cursor = conn.execute("PRAGMA table_info(requests)")
                 columns = [col["name"] for col in cursor.fetchall()]
                 if "bounded_history" not in columns:
                     conn.execute("ALTER TABLE requests ADD COLUMN bounded_history TEXT")
+                if "forward_info" not in columns:
+                    conn.execute("ALTER TABLE requests ADD COLUMN forward_info TEXT")
+                if "media_type" not in columns:
+                    conn.execute("ALTER TABLE requests ADD COLUMN media_type TEXT")
         finally:
             conn.close()
 
@@ -237,6 +247,15 @@ class Storage:
                     except Exception:
                         bounded_hist = []
 
+                fwd_info = None
+                if "forward_info" in row.keys() and row["forward_info"]:
+                    try:
+                        fwd_info = json.loads(row["forward_info"])
+                    except Exception:
+                        fwd_info = None
+
+                m_type = row["media_type"] if "media_type" in row.keys() else None
+
                 return RequestRecord(
                     request_id=row["request_id"],
                     update_id=row["update_id"],
@@ -249,6 +268,8 @@ class Storage:
                     error_code=row["error_code"],
                     tool_calls_count=row["tool_calls_count"],
                     bounded_history=bounded_hist,
+                    forward_info=fwd_info,
+                    media_type=m_type,
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                 )
@@ -273,6 +294,15 @@ class Storage:
                     except Exception:
                         bounded_hist = []
 
+                fwd_info = None
+                if "forward_info" in row.keys() and row["forward_info"]:
+                    try:
+                        fwd_info = json.loads(row["forward_info"])
+                    except Exception:
+                        fwd_info = None
+
+                m_type = row["media_type"] if "media_type" in row.keys() else None
+
                 return RequestRecord(
                     request_id=row["request_id"],
                     update_id=row["update_id"],
@@ -285,6 +315,8 @@ class Storage:
                     error_code=row["error_code"],
                     tool_calls_count=row["tool_calls_count"],
                     bounded_history=bounded_hist,
+                    forward_info=fwd_info,
+                    media_type=m_type,
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                 )
@@ -297,6 +329,9 @@ class Storage:
             history_json = (
                 json.dumps(record.bounded_history) if record.bounded_history else None
             )
+            fwd_json = (
+                json.dumps(record.forward_info) if record.forward_info else None
+            )
             conn = self._get_connection()
             try:
                 with conn:
@@ -305,14 +340,16 @@ class Storage:
                         INSERT INTO requests (
                             update_id, request_id, user_id, chat_id, message_id,
                             text, status, answer, error_code, tool_calls_count,
-                            bounded_history, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            bounded_history, forward_info, media_type, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(update_id) DO UPDATE SET
                             status = excluded.status,
                             answer = excluded.answer,
                             error_code = excluded.error_code,
                             tool_calls_count = excluded.tool_calls_count,
                             bounded_history = excluded.bounded_history,
+                            forward_info = excluded.forward_info,
+                            media_type = excluded.media_type,
                             updated_at = excluded.updated_at
                         """,
                         (
@@ -327,6 +364,8 @@ class Storage:
                             record.error_code,
                             record.tool_calls_count,
                             history_json,
+                            fwd_json,
+                            record.media_type,
                             record.created_at,
                             record.updated_at,
                         ),
