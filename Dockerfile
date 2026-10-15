@@ -27,11 +27,12 @@ WORKDIR /app
 COPY backend/requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir -r requirements.lock
 
-# Copy backend application source
+# Copy backend application source and configuration
 COPY backend /app/backend
+COPY mcp_config.json /app/mcp_config.json
 
-# Set proper ownership
-RUN chown -R appuser:appuser /app
+# Create directory for SQLite storage
+RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser

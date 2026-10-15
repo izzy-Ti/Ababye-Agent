@@ -68,20 +68,38 @@ class MCPServerSession:
         self._init_error: Optional[Exception] = None
         self._worker_task: Optional[asyncio.Task] = None
 
+    DISALLOWED_CORE_SECRETS = {
+        "EDGE_BACKEND_SECRET",
+        "CALLBACK_SIGNING_SECRET",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_WEBHOOK_SECRET",
+    }
+
     def _build_sanitized_environment(self) -> Dict[str, str]:
         """
         Build an environment containing only permitted environment variables
         from system env, combined with fixed server-specific variables.
-        Never allows untrusted or unallowlisted environment variables.
+        Passes only required server-specific variables and never leaks
+        backend core secrets (EDGE_BACKEND_SECRET, TELEGRAM_BOT_TOKEN, etc.).
         """
         env: Dict[str, str] = {}
         for var in self.permitted_env_vars:
+            if var in self.DISALLOWED_CORE_SECRETS:
+                logger.warning(
+                    f"Blocked leak of sensitive backend secret {var} to MCP server {self.name}"
+                )
+                continue
             val = os.environ.get(var)
             if val is not None:
                 env[var] = val
 
         # Merge fixed trusted environment
         for k, v in self.fixed_env.items():
+            if k in self.DISALLOWED_CORE_SECRETS:
+                logger.warning(
+                    f"Blocked leak of sensitive backend secret {k} to MCP server {self.name}"
+                )
+                continue
             env[k] = str(v)
 
         return env
