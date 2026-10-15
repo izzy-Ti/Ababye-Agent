@@ -16,6 +16,14 @@ export interface TelegramChat {
   type: "private" | "group" | "supergroup" | "channel";
 }
 
+export interface TelegramVoice {
+  file_id: string;
+  file_unique_id?: string;
+  duration?: number;
+  mime_type?: string;
+  file_size?: number;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
@@ -23,6 +31,7 @@ export interface TelegramMessage {
   date: number;
   text?: string;
   caption?: string;
+  voice?: TelegramVoice;
 }
 
 export interface TelegramUpdate {
@@ -40,6 +49,13 @@ export interface TelegramUpdate {
   chat_member?: any;
 }
 
+export interface VoiceMetadata {
+  file_id: string;
+  mime_type?: string;
+  file_size?: number;
+  duration?: number;
+}
+
 export interface NormalizedAssistantRequest {
   request_id: string;
   update_id: number;
@@ -47,6 +63,7 @@ export interface NormalizedAssistantRequest {
   chat_id: number;
   message_id: number;
   text: string;
+  voice?: VoiceMetadata;
 }
 
 export interface AssistantRunResponse {
@@ -167,29 +184,42 @@ export function evaluateTelegramUpdate(
     return { accepted: false, reason: "unauthorized_user" };
   }
 
-  // 6. Validate message text content (extract text or caption)
+  // 6. Validate message text or voice content
+  const hasVoice = Boolean(message.voice && typeof message.voice.file_id === "string");
   const rawText = message.text || message.caption || "";
-  if (typeof rawText !== "string" || !rawText.trim()) {
+
+  if (!hasVoice && (typeof rawText !== "string" || !rawText.trim())) {
     return { accepted: false, reason: "empty_text" };
   }
 
-  const trimmedText = rawText.trim();
+  const trimmedText = typeof rawText === "string" ? rawText.trim() : "";
   if (trimmedText.length > maxPromptLength) {
     return { accepted: false, reason: "prompt_too_long" };
   }
 
   const messageId = typeof message.message_id === "number" ? message.message_id : 0;
 
+  const normalized: NormalizedAssistantRequest = {
+    request_id: `tg:${update.update_id}`,
+    update_id: update.update_id,
+    user_id: from.id,
+    chat_id: chat.id,
+    message_id: messageId,
+    text: trimmedText,
+  };
+
+  if (hasVoice && message.voice) {
+    normalized.voice = {
+      file_id: message.voice.file_id,
+      mime_type: message.voice.mime_type || "audio/ogg",
+      file_size: message.voice.file_size,
+      duration: message.voice.duration,
+    };
+  }
+
   return {
     accepted: true,
-    normalized: {
-      request_id: `tg:${update.update_id}`,
-      update_id: update.update_id,
-      user_id: from.id,
-      chat_id: chat.id,
-      message_id: messageId,
-      text: trimmedText,
-    },
+    normalized,
   };
 }
 

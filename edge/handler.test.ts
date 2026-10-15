@@ -456,3 +456,30 @@ test("splitMessage correctly chunks text", () => {
   assert.equal(chunks[0].length, 50);
   assert.equal(chunks[1].length, 35);
 });
+
+test("evaluateTelegramUpdate accepts voice note and extracts file_id and metadata", () => {
+  const voiceUpdate = {
+    update_id: 117,
+    message: {
+      message_id: 25,
+      date: 1700000000,
+      chat: { id: 12345, type: "private" },
+      from: { id: 12345, is_bot: false, first_name: "Owner" },
+      voice: {
+        file_id: "AwADBAADVoiceFileId123",
+        duration: 8,
+        mime_type: "audio/ogg",
+        file_size: 15420,
+      },
+    },
+  };
+
+  const result = evaluateTelegramUpdate(voiceUpdate, 12345);
+  assert.equal(result.accepted, true);
+  assert.ok(result.normalized);
+  assert.equal(result.normalized.voice?.file_id, "AwADBAADVoiceFileId123");
+  assert.equal(result.normalized.voice?.mime_type, "audio/ogg");
+  assert.equal(result.normalized.voice?.file_size, 15420);
+  assert.equal(result.normalized.voice?.duration, 8);
+});
+

@@ -12,6 +12,7 @@ from backend.app.mcp_manager import mcp_manager
 from backend.app.providers.gemini_provider import GeminiProvider
 from backend.app.providers.base import BaseModelProvider
 from backend.app.permissions import ToolPermissionError
+from backend.app.audio import audio_service, VoiceProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,27 @@ class AgentRunner:
             await storage.save_request(record)
 
             try:
+                # Handle voice notes: fetch, validate limits, transcribe, and forward to text pipeline
+                if request.voice is not None:
+                    try:
+                        transcript = await audio_service.process_voice_note(request.voice)
+                        logger.info(f"Successfully transcribed voice note to {len(transcript)} chars")
+                        request.text = transcript
+                        record.text = transcript
+                        await storage.save_request(record)
+                    except VoiceProcessingError as voice_err:
+                        logger.warning(f"Voice processing failed: {voice_err.error_code} - {voice_err.message}")
+                        record.status = "error"
+                        record.error_code = voice_err.error_code
+                        record.answer = voice_err.message
+                        await storage.save_request(record)
+                        return RunResponse(
+                            request_id=request.request_id,
+                            status="error",
+                            answer=voice_err.message,
+                            error_code=voice_err.error_code,
+                        )
+
                 # Handle /reset command
                 if request.text.strip().lower() == "/reset":
                     await storage.clear_chat_history(request.chat_id)

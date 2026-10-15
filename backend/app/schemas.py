@@ -1,5 +1,12 @@
 from typing import Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class VoiceMetadata(BaseModel):
+    file_id: str = Field(..., description="Telegram voice file_id")
+    mime_type: Optional[str] = Field("audio/ogg", description="MIME type, e.g. audio/ogg")
+    file_size: Optional[int] = Field(None, description="Audio file size in bytes")
+    duration: Optional[int] = Field(None, description="Audio duration in seconds")
 
 
 class RunRequest(BaseModel):
@@ -8,7 +15,14 @@ class RunRequest(BaseModel):
     user_id: int = Field(..., description="Telegram user ID of the sender")
     chat_id: int = Field(..., description="Telegram chat ID")
     message_id: int = Field(..., description="Telegram message ID")
-    text: str = Field(..., min_length=1, max_length=4000, description="Normalized user text prompt")
+    text: str = Field("", max_length=4000, description="Normalized user text prompt or transcript")
+    voice: Optional[VoiceMetadata] = Field(None, description="Optional voice note metadata")
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "RunRequest":
+        if not self.text.strip() and not self.voice:
+            raise ValueError("Either 'text' or 'voice' must be provided.")
+        return self
 
 
 class RunResponse(BaseModel):
