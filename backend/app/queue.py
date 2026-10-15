@@ -13,6 +13,7 @@ from pathlib import Path
 
 from backend.app.schemas import JobRequest, JobResponse, CompletionEvent, RunRequest
 from backend.app.agent import agent_runner, AgentRunner
+from backend.app.structured_logging import log_structured_event
 
 logger = logging.getLogger("queue")
 
@@ -471,6 +472,7 @@ class QueueWorker:
                 await asyncio.sleep(1.0)
 
     async def process_job(self, job: JobRecord) -> None:
+        job_start_time = time.time()
         logger.info(f"Processing durable job {job.job_id} (attempt {job.attempts}/{job.max_retries})")
         # Run MCP + Gemini engine using standard RunRequest
         run_req = RunRequest(
@@ -498,6 +500,17 @@ class QueueWorker:
                 success=success,
             )
 
+            # Emit structured job log
+            log_structured_event(
+                event="job_completed",
+                status="completed" if success else "failed",
+                duration_seconds=time.time() - job_start_time,
+                job_id=job.job_id,
+                request_id=job.request_id,
+                chat_id=job.chat_id,
+                error_code=error_code,
+            )
+
             # Send signed callback event to edge
             callback_url = job.callback_url or self.default_callback_url
             if callback_url:
@@ -516,6 +529,15 @@ class QueueWorker:
                 answer=str(e),
                 error_code="JOB_PROCESSING_FAILED",
                 success=False,
+            )
+            log_structured_event(
+                event="job_failed",
+                status="failed",
+                duration_seconds=time.time() - job_start_time,
+                job_id=job.job_id,
+                request_id=job.request_id,
+                chat_id=job.chat_id,
+                error_code="JOB_PROCESSING_FAILED",
             )
 
     async def deliver_callback_with_backoff(

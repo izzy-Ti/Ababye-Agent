@@ -13,6 +13,7 @@ from backend.app.providers.gemini_provider import GeminiProvider
 from backend.app.providers.base import BaseModelProvider
 from backend.app.permissions import ToolPermissionError
 from backend.app.audio import audio_service, VoiceProcessingError
+from backend.app.structured_logging import log_structured_event
 
 logger = logging.getLogger(__name__)
 
@@ -238,12 +239,12 @@ class AgentRunner:
                 )
 
         # 2. Global concurrency bounding and per-chat serialization (1 active run per chat)
+        chat_lock = self._get_chat_lock(request.chat_id)
+        await chat_lock.acquire()
         await self._concurrency_semaphore.acquire()
         try:
-            chat_lock = self._get_chat_lock(request.chat_id)
-            async with chat_lock:
-                # Re-check deduplication
-                existing = await storage.get_by_update_id(request.update_id)
+            # Re-check deduplication
+            existing = await storage.get_by_update_id(request.update_id)
             if existing and existing.status == "completed":
                 return RunResponse(
                     request_id=request.request_id,
@@ -367,6 +368,26 @@ class AgentRunner:
 
                 # Bounded execution with total deadline
                 start_time = asyncio.get_running_loop().time()
+                start_wall_time = time.time()
+                invoked_tool_names: List[str] = []
+                model_usage: Dict[str, int] = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                }
+
+                def _emit_log(status: str, error_code: Optional[str] = None):
+                    log_structured_event(
+                        event="agent_run",
+                        status=status,
+                        duration_seconds=time.time() - start_wall_time,
+                        request_id=request.request_id,
+                        chat_id=request.chat_id,
+                        tool_names=list(invoked_tool_names),
+                        model_usage=dict(model_usage),
+                        error_code=error_code,
+                    )
+
                 async with asyncio.timeout(self.deadline_seconds):
                     # Load bounded history and store snapshot in record
                     history = await storage.get_chat_history(request.chat_id, limit=6)
@@ -400,6 +421,7 @@ class AgentRunner:
                             record.answer = cancel_msg
                             record.error_code = "CANCELLED"
                             await storage.save_request(record)
+                            _emit_log("cancelled", "CANCELLED")
                             return RunResponse(
                                 request_id=request.request_id,
                                 status="cancelled",
@@ -437,6 +459,16 @@ class AgentRunner:
                                 else:
                                     raise provider_err
 
+                        if hasattr(response, "usage") and response.usage:
+                            if isinstance(response.usage, dict):
+                                model_usage["prompt_tokens"] += response.usage.get("prompt_tokens", 0)
+                                model_usage["completion_tokens"] += response.usage.get("completion_tokens", 0)
+                                model_usage["total_tokens"] += response.usage.get("total_tokens", 0)
+                            else:
+                                model_usage["prompt_tokens"] += getattr(response.usage, "prompt_tokens", 0) or 0
+                                model_usage["completion_tokens"] += getattr(response.usage, "completion_tokens", 0) or 0
+                                model_usage["total_tokens"] += getattr(response.usage, "total_tokens", 0) or 0
+
                         if response.text:
                             last_model_text = response.text
 
@@ -451,6 +483,7 @@ class AgentRunner:
                             record.status = "completed"
                             record.answer = final_answer
                             await storage.save_request(record)
+                            _emit_log("completed", None)
 
                             return RunResponse(
                                 request_id=request.request_id,
@@ -495,6 +528,7 @@ class AgentRunner:
                                 record.answer = cancel_msg
                                 record.error_code = "CANCELLED"
                                 await storage.save_request(record)
+                                _emit_log("cancelled", "CANCELLED")
                                 return RunResponse(
                                     request_id=request.request_id,
                                     status="cancelled",
@@ -502,6 +536,7 @@ class AgentRunner:
                                     error_code="CANCELLED",
                                 )
                             tool_calls_count += 1
+                            invoked_tool_names.append(tc.name)
                             elapsed = asyncio.get_running_loop().time() - start_time
                             remaining = max(0.5, self.deadline_seconds - elapsed)
                             per_tool_timeout = min(10.0, max(1.0, remaining - 1.0))
@@ -544,6 +579,7 @@ class AgentRunner:
                         record.error_code = "LIMIT_EXHAUSTED"
                         record.answer = partial_status_msg
                         await storage.save_request(record)
+                        _emit_log("error", "LIMIT_EXHAUSTED")
 
                         return RunResponse(
                             request_id=request.request_id,
@@ -559,6 +595,7 @@ class AgentRunner:
                 record.error_code = "DEADLINE_EXCEEDED"
                 record.answer = timeout_msg
                 await storage.save_request(record)
+                _emit_log("error", "DEADLINE_EXCEEDED")
                 return RunResponse(
                     request_id=request.request_id,
                     status="error",
@@ -571,6 +608,7 @@ class AgentRunner:
                 record.error_code = "INTERNAL_ERROR"
                 record.answer = str(e) or "An internal error occurred."
                 await storage.save_request(record)
+                _emit_log("error", "INTERNAL_ERROR")
                 return RunResponse(
                     request_id=request.request_id,
                     status="error",
@@ -579,6 +617,7 @@ class AgentRunner:
                 )
         finally:
             self._concurrency_semaphore.release()
+            chat_lock.release()
 
 
 agent_runner = AgentRunner()

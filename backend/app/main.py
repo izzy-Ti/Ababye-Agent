@@ -17,10 +17,15 @@ from backend.app.agent import agent_runner
 from backend.app.mcp_manager import mcp_manager
 from backend.app.queue import durable_queue, queue_worker, JobRecord
 
+from backend.app.structured_logging import RedactingLogFilter
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+for handler in logging.root.handlers:
+    handler.addFilter(RedactingLogFilter())
+
 logger = logging.getLogger("backend")
 
 
