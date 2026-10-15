@@ -1,0 +1,44 @@
+name: Build and Deploy Backend
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'backend/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'mcp_config.json'
+      - '.github/workflows/**'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. Build the container with root context so mcp_config.json and backend are accessible
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (Task 15 validation)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false           # Set to true if pushing to GitHub Packages / Docker Hub
+
+      # 2. Deploy to your host via SSH
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/telegram-agent
+            git pull origin main
+            # Build and restart only the backend service
+            docker compose build backend
+            docker compose up -d backend
