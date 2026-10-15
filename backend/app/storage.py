@@ -226,6 +226,27 @@ class Storage:
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS daily_usage (
+                        date_key TEXT NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        request_count INTEGER DEFAULT 0,
+                        token_count INTEGER DEFAULT 0,
+                        PRIMARY KEY (date_key, user_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS failure_tracking (
+                        chat_id INTEGER PRIMARY KEY,
+                        consecutive_failures INTEGER DEFAULT 0,
+                        last_failure_at REAL,
+                        last_error_code TEXT
+                    )
+                    """
+                )
 
                 # Ensure bounded_history, forward_info, and media_type columns exist for backward compatibility
                 cursor = conn.execute("PRAGMA table_info(requests)")
@@ -658,6 +679,157 @@ class Storage:
                         )
                     )
                 return records
+            finally:
+                conn.close()
+
+    async def check_and_increment_usage(
+        self,
+        user_id: int,
+        tokens: int = 0,
+        max_requests: Optional[int] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Check daily request and token usage against limits.
+        If under limits, increments usage and returns (True, "").
+        If exceeded, returns (False, error_message).
+        """
+        import datetime
+        date_key = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        limit_requests = max_requests if max_requests is not None else int(os.environ.get("MAX_DAILY_REQUESTS", "100"))
+        limit_tokens = max_tokens if max_tokens is not None else int(os.environ.get("MAX_DAILY_TOKENS", "100000"))
+
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    cursor = conn.execute(
+                        "SELECT request_count, token_count FROM daily_usage WHERE date_key = ? AND user_id = ?",
+                        (date_key, user_id),
+                    )
+                    row = cursor.fetchone()
+                    current_requests = row["request_count"] if row else 0
+                    current_tokens = row["token_count"] if row else 0
+
+                    if current_requests >= limit_requests:
+                        return False, f"Daily request cap of {limit_requests} requests reached. Please try again tomorrow."
+                    if current_tokens >= limit_tokens:
+                        return False, f"Daily token cap of {limit_tokens} tokens reached. Please try again tomorrow."
+
+                    new_requests = current_requests + 1
+                    new_tokens = current_tokens + tokens
+                    conn.execute(
+                        """
+                        INSERT INTO daily_usage (date_key, user_id, request_count, token_count)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(date_key, user_id) DO UPDATE SET
+                            request_count = excluded.request_count,
+                            token_count = excluded.token_count
+                        """,
+                        (date_key, user_id, new_requests, new_tokens),
+                    )
+                    return True, ""
+            finally:
+                conn.close()
+
+    async def cleanup_retention_data(
+        self,
+        history_days: int = 30,
+        request_days: int = 30,
+    ) -> Dict[str, int]:
+        """
+        Purges chat history and request records older than the configured retention period,
+        and removes expired unexecuted write actions.
+        """
+        now = time.time()
+        history_cutoff = now - (history_days * 86400)
+        request_cutoff = now - (request_days * 86400)
+
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    cur_hist = conn.execute(
+                        "DELETE FROM chat_history WHERE created_at < ?",
+                        (history_cutoff,),
+                    )
+                    deleted_hist = cur_hist.rowcount
+
+                    cur_req = conn.execute(
+                        "DELETE FROM requests WHERE created_at < ?",
+                        (request_cutoff,),
+                    )
+                    deleted_req = cur_req.rowcount
+
+                    cur_act = conn.execute(
+                        "DELETE FROM write_actions WHERE expires_at < ? AND status != 'executed'",
+                        (now,),
+                    )
+                    deleted_act = cur_act.rowcount
+
+                    return {
+                        "deleted_history": deleted_hist,
+                        "deleted_requests": deleted_req,
+                        "deleted_expired_actions": deleted_act,
+                    }
+            finally:
+                conn.close()
+
+    async def record_failure_and_check_alert(
+        self,
+        chat_id: int,
+        error_code: str,
+        threshold: int = 3,
+    ) -> Tuple[bool, int]:
+        """
+        Record a failure for chat_id. If consecutive failures reach or exceed threshold,
+        triggers failure alert and returns (True, count).
+        """
+        now = time.time()
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    cursor = conn.execute(
+                        "SELECT consecutive_failures FROM failure_tracking WHERE chat_id = ?",
+                        (chat_id,),
+                    )
+                    row = cursor.fetchone()
+                    count = (row["consecutive_failures"] + 1) if row else 1
+
+                    conn.execute(
+                        """
+                        INSERT INTO failure_tracking (chat_id, consecutive_failures, last_failure_at, last_error_code)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            consecutive_failures = excluded.consecutive_failures,
+                            last_failure_at = excluded.last_failure_at,
+                            last_error_code = excluded.last_error_code
+                        """,
+                        (chat_id, count, now, error_code),
+                    )
+                    is_alert = count >= threshold
+                    if is_alert:
+                        import logging
+                        logging.getLogger("backend").warning(
+                            f"[FAILURE_ALERT] Consecutive failure threshold exceeded ({count} failures) for chat {chat_id} (error: {error_code})"
+                        )
+                    return is_alert, count
+            finally:
+                conn.close()
+
+    async def reset_failure_counter(self, chat_id: int) -> None:
+        """
+        Reset consecutive failures on successful run.
+        """
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        "UPDATE failure_tracking SET consecutive_failures = 0 WHERE chat_id = ?",
+                        (chat_id,),
+                    )
             finally:
                 conn.close()
 

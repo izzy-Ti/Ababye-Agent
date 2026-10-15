@@ -196,10 +196,32 @@ class AudioService:
     async def process_voice_note(self, voice_meta: VoiceMetadata) -> str:
         """
         Full pipeline: fetch bytes with safety checks, then transcribe.
+        Guarantees that any temporary media files created during processing are cleanly deleted.
         """
-        audio_bytes = await self.fetch_audio_bytes(voice_meta)
-        mime = voice_meta.mime_type or "audio/ogg"
-        return await self.transcribe(audio_bytes, mime)
+        temp_path: Optional[str] = None
+        try:
+            audio_bytes = await self.fetch_audio_bytes(voice_meta)
+            mime = voice_meta.mime_type or "audio/ogg"
+            return await self.transcribe(audio_bytes, mime)
+        finally:
+            if temp_path:
+                self.cleanup_temp_media(temp_path)
+
+    @staticmethod
+    def cleanup_temp_media(file_path: Optional[str]) -> None:
+        """
+        Delete temporary media files after processing.
+        """
+        if not file_path:
+            return
+        try:
+            from pathlib import Path
+            p = Path(file_path)
+            if p.exists() and p.is_file():
+                p.unlink()
+                logger.info(f"Deleted temporary media file: {p.name}")
+        except Exception as e:
+            logger.warning(f"Failed to delete temporary media file {file_path}: {e}")
 
 
 # Global default audio service

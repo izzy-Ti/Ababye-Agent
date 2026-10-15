@@ -253,6 +253,17 @@ class AgentRunner:
                     error_code=existing.error_code,
                 )
 
+            # Check daily usage cap
+            allowed, cap_msg = await storage.check_and_increment_usage(request.user_id)
+            if not allowed:
+                logger.warning(f"Usage cap exceeded for user {request.user_id}: {cap_msg}")
+                return RunResponse(
+                    request_id=request.request_id,
+                    status="error",
+                    answer=cap_msg,
+                    error_code="USAGE_CAP_EXCEEDED",
+                )
+
             # Record in-progress state (forwarded content is strictly treated as untrusted user-provided content)
             if request.forward_info:
                 logger.info(
@@ -483,6 +494,7 @@ class AgentRunner:
                             record.status = "completed"
                             record.answer = final_answer
                             await storage.save_request(record)
+                            await storage.reset_failure_counter(request.chat_id)
                             _emit_log("completed", None)
 
                             return RunResponse(
@@ -579,6 +591,7 @@ class AgentRunner:
                         record.error_code = "LIMIT_EXHAUSTED"
                         record.answer = partial_status_msg
                         await storage.save_request(record)
+                        await storage.record_failure_and_check_alert(request.chat_id, "LIMIT_EXHAUSTED")
                         _emit_log("error", "LIMIT_EXHAUSTED")
 
                         return RunResponse(
@@ -595,6 +608,7 @@ class AgentRunner:
                 record.error_code = "DEADLINE_EXCEEDED"
                 record.answer = timeout_msg
                 await storage.save_request(record)
+                await storage.record_failure_and_check_alert(request.chat_id, "DEADLINE_EXCEEDED")
                 _emit_log("error", "DEADLINE_EXCEEDED")
                 return RunResponse(
                     request_id=request.request_id,
@@ -608,6 +622,7 @@ class AgentRunner:
                 record.error_code = "INTERNAL_ERROR"
                 record.answer = str(e) or "An internal error occurred."
                 await storage.save_request(record)
+                await storage.record_failure_and_check_alert(request.chat_id, "INTERNAL_ERROR")
                 _emit_log("error", "INTERNAL_ERROR")
                 return RunResponse(
                     request_id=request.request_id,

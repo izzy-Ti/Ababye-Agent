@@ -371,6 +371,27 @@ class DurableJobQueue:
             finally:
                 conn.close()
 
+    async def cleanup_job_retention(self, retention_hours: float = 24.0) -> int:
+        """
+        Purges completed or failed jobs older than retention_hours.
+        """
+        cutoff = time.time() - (retention_hours * 3600)
+        async with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    cur = conn.execute(
+                        """
+                        DELETE FROM durable_jobs
+                        WHERE status IN ('completed', 'failed', 'cancelled')
+                        AND updated_at < ?
+                        """,
+                        (cutoff,),
+                    )
+                    return cur.rowcount
+            finally:
+                conn.close()
+
     def _row_to_record(self, row: sqlite3.Row) -> JobRecord:
         voice_meta = None
         if "voice_metadata" in row.keys() and row["voice_metadata"]:
