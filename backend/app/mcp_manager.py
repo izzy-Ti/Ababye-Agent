@@ -9,6 +9,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from backend.app.permissions import tool_permission_validator, ToolPermissionError
+
 logger = logging.getLogger(__name__)
 
 
@@ -333,15 +335,24 @@ class MCPManager:
         namespaced_tool_name: str,
         arguments: Dict[str, Any],
         timeout_seconds: float = 10.0,
+        is_write_confirmed: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute an approved tool using its namespaced identifier.
+        Enforces access checks in code before each call.
         """
         tool_def = self._tools.get(namespaced_tool_name)
         if not tool_def:
             raise ValueError(
                 f"Tool '{namespaced_tool_name}' is not in the approved allowlist"
             )
+
+        # Enforce security permissions and argument constraints before execution
+        tool_permission_validator.validate_tool_call(
+            tool_name=namespaced_tool_name,
+            arguments=arguments,
+            is_write_confirmed=is_write_confirmed,
+        )
 
         server = self._servers.get(tool_def.server_name)
         if not server or not server.is_connected:
