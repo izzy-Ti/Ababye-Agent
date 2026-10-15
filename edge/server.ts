@@ -35,6 +35,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Backend signed completion callback endpoint
+  if (req.method === "POST" && (url.pathname === "/v1/assistant/callback" || url.pathname === "/callback")) {
+    let bodyText = "";
+    req.on("data", (chunk) => {
+      bodyText += chunk;
+    });
+
+    req.on("end", async () => {
+      try {
+        const sigHeader = (req.headers["x-assistant-signature"] || req.headers["x-signature-sha256"]) as string | undefined;
+        const tsHeader = (req.headers["x-assistant-timestamp"] || req.headers["x-signature-timestamp"]) as string | undefined;
+
+        const { handleBackendCallback } = await import("./callback.ts");
+        const result = await handleBackendCallback(bodyText, sigHeader, tsHeader, config);
+        res.writeHead(result.statusCode, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.responseBody));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Callback processing failed", details: err.message }));
+      }
+    });
+    return;
+  }
+
   // Not found
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Not Found" }));

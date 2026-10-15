@@ -46,6 +46,47 @@ class RunResponse(BaseModel):
     error_code: Optional[str] = Field(None, description="Machine-readable error code if failed")
 
 
+class JobRequest(BaseModel):
+    request_id: str = Field(..., description="Unique request identifier, e.g. tg:12345")
+    update_id: int = Field(..., description="Telegram update ID for deduplication")
+    user_id: int = Field(..., description="Telegram user ID of the sender")
+    chat_id: int = Field(..., description="Telegram chat ID")
+    message_id: int = Field(..., description="Telegram message ID")
+    text: str = Field("", max_length=4000, description="Normalized user text prompt or transcript")
+    voice: Optional[VoiceMetadata] = Field(None, description="Optional voice note metadata")
+    forward_info: Optional[Dict[str, Any]] = Field(None, description="Attribution metadata for forwarded message")
+    media_type: Optional[str] = Field(None, description="Media type if media caption was provided")
+    callback_url: Optional[str] = Field(None, description="Edge callback URL for signed completion delivery")
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "JobRequest":
+        if not self.text.strip() and not self.voice:
+            raise ValueError("Either 'text' or 'voice' must be provided.")
+        return self
+
+
+class JobResponse(BaseModel):
+    job_id: str = Field(..., description="Durable job identifier")
+    request_id: str = Field(..., description="Original request identifier")
+    status: Literal["queued", "running", "completed", "failed", "cancelled"] = Field(
+        ..., description="Current job status"
+    )
+    answer: Optional[str] = Field(None, description="Job result answer if completed")
+    error_code: Optional[str] = Field(None, description="Error code if failed")
+
+
+class CompletionEvent(BaseModel):
+    event_id: str = Field(..., description="Unique completion event identifier")
+    job_id: str = Field(..., description="Job identifier")
+    request_id: str = Field(..., description="Request identifier")
+    user_id: int = Field(..., description="Telegram user ID")
+    chat_id: int = Field(..., description="Telegram chat ID")
+    status: Literal["completed", "failed"] = Field(..., description="Execution outcome")
+    answer: Optional[str] = Field(None, description="Assistant answer text")
+    error_code: Optional[str] = Field(None, description="Error code if execution failed")
+    created_at: float = Field(..., description="Timestamp when event was generated")
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"

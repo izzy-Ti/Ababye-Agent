@@ -565,3 +565,35 @@ export async function handleTelegramWebhook(
     return { statusCode: 200, responseBody: result };
   }
 }
+
+/**
+ * Submits a durable background job to backend POST /v1/assistant/jobs.
+ * Returns { job_id, status: "queued", request_id } on HTTP 202.
+ */
+export async function callBackendJobs(
+  payload: NormalizedAssistantRequest,
+  cfg: EdgeConfig = defaultConfig,
+  callbackUrl?: string
+): Promise<{ job_id: string; status: string; request_id: string }> {
+  const url = `${cfg.backendUrl}/v1/assistant/jobs`;
+  const body = {
+    ...payload,
+    callback_url: callbackUrl,
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${cfg.edgeBackendSecret}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (response.status !== 202 && response.status !== 200) {
+    throw new Error(`Backend jobs submission failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as { job_id: string; status: string; request_id: string };
+}
+
