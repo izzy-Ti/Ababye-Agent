@@ -1,12 +1,17 @@
 import os
+import time
+import json
+import uuid
+import secrets
 import asyncio
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from backend.app.schemas import RunRequest, RunResponse
-from backend.app.storage import storage, RequestRecord
+from backend.app.storage import storage, RequestRecord, ActionRecord
 from backend.app.mcp_manager import mcp_manager
 from backend.app.providers.gemini_provider import GeminiProvider
 from backend.app.providers.base import BaseModelProvider
+from backend.app.permissions import ToolPermissionError
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,8 @@ class AgentRunner:
     4. Bounds context size and per-tool output size.
     5. Stops on final answer, deadline, cancellation, or limits.
     6. Returns a useful partial-status message on limit exhaustion without claiming success.
+    7. Supports /reset to clear chat context.
+    8. Supports write action proposals and /confirm verification (sender, expiry, unused state, idempotency).
     """
 
     def __init__(
@@ -57,10 +64,6 @@ class AgentRunner:
         user_prompt: str,
         max_chars: int = 12000,
     ) -> List[Dict[str, Any]]:
-        """
-        Assemble history and user prompt, ensuring combined context does not exceed character bounds.
-        Drops oldest history turns if total size exceeds max_chars.
-        """
         user_msg = {"role": "user", "content": user_prompt}
         total_len = len(user_prompt)
 
@@ -74,6 +77,131 @@ class AgentRunner:
 
         bounded_history.append(user_msg)
         return bounded_history
+
+    async def propose_write_action(
+        self,
+        chat_id: int,
+        user_id: int,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        ttl_seconds: float = 300.0,
+    ) -> Tuple[ActionRecord, str]:
+        """
+        Represent a proposed write action as a stored record with validated arguments
+        and a short-lived confirmation token. Display the exact action in Telegram.
+        """
+        action_id = f"act_{secrets.token_hex(6)}"
+        confirmation_token = secrets.token_hex(4)
+        idempotency_key = f"idemp_{uuid.uuid4().hex}"
+        now = time.time()
+
+        action = ActionRecord(
+            action_id=action_id,
+            idempotency_key=idempotency_key,
+            chat_id=chat_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            confirmation_token=confirmation_token,
+            status="pending",
+            created_at=now,
+            expires_at=now + ttl_seconds,
+        )
+        await storage.save_write_action(action)
+
+        display_text = (
+            f"Action confirmation required:\n\n"
+            f"Tool: {tool_name}\n"
+            f"Arguments: {json.dumps(arguments, indent=2)}\n"
+            f"Confirmation Token: {confirmation_token}\n"
+            f"Expires In: {int(ttl_seconds)}s\n\n"
+            f"To confirm and execute, reply with:\n"
+            f"/confirm {confirmation_token}\n\n"
+            f"(Note: A conversational approval message is insufficient; explicit /confirm is required.)"
+        )
+        return action, display_text
+
+    async def confirm_action(
+        self,
+        chat_id: int,
+        user_id: int,
+        token_or_id: str,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Verify sender, action ID, expiry, and unused state on confirmation.
+        Execute once using an idempotency key.
+        """
+        if not token_or_id:
+            return False, "Usage: /confirm <confirmation_token>", None
+
+        action = await storage.get_action_by_token_or_id(chat_id, token_or_id)
+        if not action:
+            return False, "Confirmation failed: Action or token not found for this chat.", None
+
+        # 1. Verify sender
+        if action.user_id != user_id:
+            logger.warning(
+                f"Confirmation rejected: sender mismatch (action.user_id={action.user_id}, sender={user_id})"
+            )
+            return (
+                False,
+                "Confirmation rejected: You are not authorized to confirm this action (sender mismatch).",
+                None,
+            )
+
+        # 2. Verify expiry
+        if time.time() > action.expires_at:
+            logger.warning(f"Confirmation rejected: action {action.action_id} expired")
+            return (
+                False,
+                "Confirmation rejected: The confirmation token has expired.",
+                None,
+            )
+
+        # 3. Verify unused state
+        if action.status != "pending":
+            logger.warning(
+                f"Confirmation rejected: action {action.action_id} in state '{action.status}'"
+            )
+            return (
+                False,
+                f"Confirmation rejected: This action has already been {action.status} (repeated execution blocked).",
+                None,
+            )
+
+        # 4. Atomic claim using idempotency key
+        claimed = await storage.claim_action_for_execution(action.action_id, user_id)
+        if not claimed:
+            return (
+                False,
+                "Confirmation rejected: Action could not be claimed or was already executed.",
+                None,
+            )
+
+        # 5. Execute once with write confirmation flag
+        try:
+            result = await mcp_manager.execute_tool(
+                namespaced_tool_name=action.tool_name,
+                arguments=action.arguments,
+                is_write_confirmed=True,
+            )
+            result_text = result.get("text", "")
+            await storage.complete_action_execution(
+                action.action_id, result_text, success=True
+            )
+            success_msg = (
+                f"Confirmed action '{action.tool_name}' executed successfully.\n"
+                f"Result: {result_text}"
+            )
+            return True, success_msg, result
+
+        except Exception as e:
+            logger.exception(f"Error executing confirmed action {action.action_id}")
+            err_text = str(e)
+            await storage.complete_action_execution(
+                action.action_id, err_text, success=False
+            )
+            return False, f"Action execution failed: {err_text}", None
 
     async def run(self, request: RunRequest) -> RunResponse:
         # 1. Authoritative deduplication check
@@ -109,7 +237,7 @@ class AgentRunner:
         # 2. Serialize execution per chat (1 active run per chat)
         chat_lock = self._get_chat_lock(request.chat_id)
         async with chat_lock:
-            # Re-check deduplication in case a concurrent request finished while waiting for lock
+            # Re-check deduplication
             existing = await storage.get_by_update_id(request.update_id)
             if existing and existing.status == "completed":
                 return RunResponse(
@@ -146,6 +274,27 @@ class AgentRunner:
                         error_code=None,
                     )
 
+                # Handle /confirm command
+                text_strip = request.text.strip()
+                if text_strip.lower().startswith("/confirm"):
+                    parts = text_strip.split(maxsplit=1)
+                    token_or_id = parts[1].strip() if len(parts) > 1 else ""
+                    success, message, _result = await self.confirm_action(
+                        chat_id=request.chat_id,
+                        user_id=request.user_id,
+                        token_or_id=token_or_id,
+                    )
+                    record.status = "completed"
+                    record.answer = message
+                    record.error_code = None if success else "CONFIRMATION_REJECTED"
+                    await storage.save_request(record)
+                    return RunResponse(
+                        request_id=request.request_id,
+                        status="completed",
+                        answer=message,
+                        error_code=record.error_code,
+                    )
+
                 # Ensure MCP tools are ready
                 if not mcp_manager._initialized:
                     await mcp_manager.initialize()
@@ -156,8 +305,11 @@ class AgentRunner:
                 # Bounded execution with total deadline
                 start_time = asyncio.get_running_loop().time()
                 async with asyncio.timeout(self.deadline_seconds):
-                    # Load bounded history
+                    # Load bounded history and store snapshot in record
                     history = await storage.get_chat_history(request.chat_id, limit=6)
+                    record.bounded_history = history
+                    await storage.save_request(record)
+
                     messages = self._bound_context_messages(history, request.text)
 
                     provider = self._get_provider()
@@ -227,7 +379,6 @@ class AgentRunner:
                             tool_calls_count += 1
                             elapsed = asyncio.get_running_loop().time() - start_time
                             remaining = max(0.5, self.deadline_seconds - elapsed)
-                            # Keep per-tool timeout shorter than remaining total deadline
                             per_tool_timeout = min(10.0, max(1.0, remaining - 1.0))
 
                             try:
@@ -237,11 +388,13 @@ class AgentRunner:
                                     timeout_seconds=per_tool_timeout,
                                 )
                                 raw_text = tool_result.get("text", "")
-                                # Bound each tool result length (4000 chars) to prevent context blowout
                                 if len(raw_text) > 4000:
                                     result_text = raw_text[:4000] + "\n...[truncated output exceeds 4000 chars]"
                                 else:
                                     result_text = raw_text
+                            except ToolPermissionError as perm_err:
+                                logger.warning(f"Tool permission error for {tc.name}: {perm_err}")
+                                result_text = f"Permission Denied: {str(perm_err)}"
                             except Exception as tool_err:
                                 logger.warning(f"Tool execution failed for {tc.name}: {tool_err}")
                                 result_text = f"Error executing tool {tc.name}: {str(tool_err)}"
