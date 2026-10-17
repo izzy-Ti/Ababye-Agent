@@ -1,6 +1,6 @@
-# Merigeta Agent: Private Personal Telegram AI Assistant
+# Ababye Agent: Private Personal Telegram AI Assistant
 
-Merigeta Agent is a secure, single-tenant, private AI personal assistant built for Telegram. It couples an edge gateway (Cloudflare Worker / Node.js) with a containerized FastAPI backend, local Model Context Protocol (MCP) tool subprocesses, and Google Gemini (`gemini-2.5-flash`).
+Ababye Agent is a secure, single-tenant, private AI personal assistant built for Telegram. It couples an edge gateway (Cloudflare Worker / Node.js) with a containerized FastAPI backend, local Model Context Protocol (MCP) tool subprocesses, and Google Gemini (`gemini-2.5-flash`).
 
 ---
 
